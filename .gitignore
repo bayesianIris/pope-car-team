@@ -1,0 +1,65 @@
+# Python bytecode and caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build artifacts
+build/
+dist/
+.eggs/
+*.egg-info/
+pip-wheel-metadata/
+
+# Python environments
+.venv/
+venv/
+env/
+ENV/
+
+# Tool caches and test artifacts
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Logs and temp files
+*.log
+logs/
+log/
+tmp/
+temp/
+
+# Training artifacts and checkpoints
+ckpt/**
+!ckpt/.gitkeep
+*.ckpt
+model.ckpt-*.pkl
+*.pth
+*.pt
+*.onnx
+runs/
+wandb/
+mlruns/
+events.out.tfevents*
+
+# Local environment files
+.env
+.env.*
+*.local
+
+# VS Code local files
+.vscode/launch.json
+.vscode/tasks.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Project local generated config
+conf/kaiwudrl/
