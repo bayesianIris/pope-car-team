@@ -39,8 +39,8 @@ class Config:
     ACTION_NUM = 16
 
     # Action penalties / 动作惩罚
-    ACTION_FAIL_PENALTY = 0.08
-    ILLEGAL_ACTION_PENALTY = 0.15
+    ACTION_FAIL_PENALTY = 0.30
+    ILLEGAL_ACTION_PENALTY = 0.30
 
     # Value head / 价值头：单头生存奖励
     VALUE_NUM = 1

@@ -16,6 +16,7 @@ from agent_ppo.conf.conf import Config
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
+MAX_MAP_DISTANCE = MAP_SIZE * 1.41
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 5.0
 # Max distance bucket / 距离桶最大值
@@ -28,8 +29,13 @@ MAX_BUFF_DURATION = 50.0
 TREASURE_PICKUP_REWARD = 2.0
 BUFF_PICKUP_REWARD = 0.8
 # Proximity shaping weights / 接近目标奖励系数
-TREASURE_PROXIMITY_WEIGHT = 0.06
-BUFF_PROXIMITY_WEIGHT = 0.03
+TREASURE_PROXIMITY_WEIGHT = 0.5
+TREASURE_PROXIMITY_LAMBDA = 0.5
+BUFF_PROXIMITY_WEIGHT = TREASURE_PROXIMITY_WEIGHT * 0.8 / 2
+BUFF_PROXIMITY_LAMBDA = 0.5
+MONSTER_PROXIMITY_WEIGHT = TREASURE_PROXIMITY_WEIGHT * 1.836
+MONSTER_PROXIMITY_LAMBDA = 0.5
+MONSTER_UNSEEN_DISTANCE = 12.0
 
 
 def _norm(v, v_max, v_min=0.0):
@@ -59,9 +65,9 @@ class Preprocessor:
     def reset(self):
         self.step_no = 0
         self.max_step = 200
-        self.last_min_monster_dist_norm = 0.5
-        self.last_nearest_treasure_dist_norm = 1.0
-        self.last_nearest_buff_dist_norm = 1.0
+        self.last_min_monster_dist = MONSTER_UNSEEN_DISTANCE
+        self.last_nearest_treasure_dist = MAX_MAP_DISTANCE
+        self.last_nearest_buff_dist = MAX_MAP_DISTANCE
         self.last_treasures_collected = None
         self.last_buffs_collected = None
         self.prev_hero_pos = None
@@ -94,6 +100,7 @@ class Preprocessor:
         # Monster features (5D x 2) / 怪物特征
         monsters = frame_state.get("monsters", [])
         monster_feats = []
+        cur_min_monster_dist = MONSTER_UNSEEN_DISTANCE
         for i in range(2):
             if i < len(monsters):
                 m = monsters[i]
@@ -106,7 +113,8 @@ class Preprocessor:
 
                     # Euclidean distance / 欧式距离
                     raw_dist = np.sqrt((hero_pos["x"] - m_pos["x"]) ** 2 + (hero_pos["z"] - m_pos["z"]) ** 2)
-                    dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
+                    dist_norm = _norm(raw_dist, MAX_MAP_DISTANCE)
+                    cur_min_monster_dist = min(cur_min_monster_dist, float(np.clip(raw_dist, 0.0, MONSTER_UNSEEN_DISTANCE)))
                 else:
                     m_x_norm = 0.0
                     m_z_norm = 0.0
@@ -120,10 +128,10 @@ class Preprocessor:
 
         # Organ features (treasure + buff, 8D) / 物件特征（宝箱+buff）
         organs = frame_state.get("organs", [])
-        nearest_treasure_dist_norm, nearest_treasure_dir_norm, treasure_available = self._nearest_organ_feature(
+        nearest_treasure_dist_norm, nearest_treasure_dist, nearest_treasure_dir_norm, treasure_available = self._nearest_organ_feature(
             organs, hero_pos, sub_type=1
         )
-        nearest_buff_dist_norm, nearest_buff_dir_norm, buff_available = self._nearest_organ_feature(
+        nearest_buff_dist_norm, nearest_buff_dist, nearest_buff_dir_norm, buff_available = self._nearest_organ_feature(
             organs, hero_pos, sub_type=2
         )
 
@@ -185,20 +193,21 @@ class Preprocessor:
         )
 
         # Step reward / 即时奖励
-        cur_min_dist_norm = 1.0
-        for m_feat in monster_feats:
-            if m_feat[0] > 0:
-                cur_min_dist_norm = min(cur_min_dist_norm, m_feat[4])
-
-        survive_reward = 0.01
-        dist_shaping = 0.1 * (cur_min_dist_norm - self.last_min_monster_dist_norm)
+        survive_reward = 0.03
+        monster_dist_reward = (
+            MONSTER_PROXIMITY_WEIGHT * (MONSTER_PROXIMITY_LAMBDA ** (self.last_min_monster_dist - 1.0))
+            - MONSTER_PROXIMITY_WEIGHT * (MONSTER_PROXIMITY_LAMBDA ** (cur_min_monster_dist - 1.0))
+        )
 
         # Reward for moving closer to targets / 接近宝箱和buff奖励
-        treasure_close_reward = TREASURE_PROXIMITY_WEIGHT * max(
-            0.0, self.last_nearest_treasure_dist_norm - nearest_treasure_dist_norm
+        treasure_close_reward = (
+            TREASURE_PROXIMITY_WEIGHT * (TREASURE_PROXIMITY_LAMBDA ** (nearest_treasure_dist - 1.0))
+            - TREASURE_PROXIMITY_WEIGHT
+            * (TREASURE_PROXIMITY_LAMBDA ** (self.last_nearest_treasure_dist - 1.0))
         )
-        buff_close_reward = BUFF_PROXIMITY_WEIGHT * max(
-            0.0, self.last_nearest_buff_dist_norm - nearest_buff_dist_norm
+        buff_close_reward = (
+            BUFF_PROXIMITY_WEIGHT * (BUFF_PROXIMITY_LAMBDA ** (nearest_buff_dist - 1.0))
+            - BUFF_PROXIMITY_WEIGHT * (BUFF_PROXIMITY_LAMBDA ** (self.last_nearest_buff_dist - 1.0))
         )
 
         if self.last_treasures_collected is None:
@@ -228,9 +237,9 @@ class Preprocessor:
             elif not moved:
                 action_penalty -= Config.ACTION_FAIL_PENALTY
 
-        self.last_min_monster_dist_norm = cur_min_dist_norm
-        self.last_nearest_treasure_dist_norm = nearest_treasure_dist_norm
-        self.last_nearest_buff_dist_norm = nearest_buff_dist_norm
+        self.last_min_monster_dist = cur_min_monster_dist
+        self.last_nearest_treasure_dist = nearest_treasure_dist
+        self.last_nearest_buff_dist = nearest_buff_dist
         self.last_treasures_collected = treasures_collected
         self.last_buffs_collected = buffs_collected
         self.prev_hero_pos = (int(hero_pos.get("x", 0)), int(hero_pos.get("z", 0)))
@@ -238,7 +247,7 @@ class Preprocessor:
 
         reward = [
             survive_reward
-            + dist_shaping
+            + monster_dist_reward
             + treasure_close_reward
             + buff_close_reward
             + pickup_reward
@@ -253,6 +262,7 @@ class Preprocessor:
         按类型提取最近物件的距离和方向特征。
         """
         nearest_dist_norm = 1.0
+        nearest_dist = MAX_MAP_DISTANCE
         nearest_dir_norm = 0.0
         available = False
 
@@ -263,22 +273,19 @@ class Preprocessor:
                 continue
 
             available = True
-            dist_bucket = organ.get("hero_l2_distance", None)
-            if dist_bucket is None:
-                organ_pos = organ.get("pos", {})
-                raw_dist = np.sqrt(
-                    (float(hero_pos.get("x", 0)) - float(organ_pos.get("x", 0))) ** 2
-                    + (float(hero_pos.get("z", 0)) - float(organ_pos.get("z", 0))) ** 2
-                )
-                dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
-            else:
-                dist_norm = _norm(dist_bucket, MAX_DIST_BUCKET)
+            organ_pos = organ.get("pos", {})
+            raw_dist = np.sqrt(
+                (float(hero_pos.get("x", 0)) - float(organ_pos.get("x", 0))) ** 2
+                + (float(hero_pos.get("z", 0)) - float(organ_pos.get("z", 0))) ** 2
+            )
+            dist = float(raw_dist)
 
-            if dist_norm < nearest_dist_norm:
-                nearest_dist_norm = dist_norm
+            if dist < nearest_dist:
+                nearest_dist = dist
+                nearest_dist_norm = _norm(dist, MAX_MAP_DISTANCE)
                 nearest_dir_norm = _norm(organ.get("hero_relative_direction", 0), 8.0)
 
-        return nearest_dist_norm, nearest_dir_norm, available
+        return nearest_dist_norm, nearest_dist, nearest_dir_norm, available
 
     def _build_map_feature(self, map_info, hero_pos, frame_state):
         """Build a fixed-size map image feature.
