@@ -33,8 +33,8 @@ TREASURE_PROXIMITY_WEIGHT = 0.5
 TREASURE_PROXIMITY_LAMBDA = 0.5
 BUFF_PROXIMITY_WEIGHT = TREASURE_PROXIMITY_WEIGHT * 0.8 / 2
 BUFF_PROXIMITY_LAMBDA = 0.5
-MONSTER_PROXIMITY_WEIGHT = TREASURE_PROXIMITY_WEIGHT * 1.836
-MONSTER_PROXIMITY_LAMBDA = 0.5
+MONSTER_PROXIMITY_WEIGHT = 2.0  # Increased base weight
+MONSTER_PROXIMITY_LAMBDA = 0.85 # Fades much slower, giving strong signal from afar
 MONSTER_UNSEEN_DISTANCE = 12.0
 
 
@@ -72,6 +72,7 @@ class Preprocessor:
         self.last_buffs_collected = None
         self.prev_hero_pos = None
         self.prev_legal_action = None
+        self.global_map = np.full((128, 128), -1.0, dtype=np.float32)
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -159,6 +160,9 @@ class Preprocessor:
 
         # Full map view for CNN / 地图全视野 CNN 输入
         map_feat = self._build_map_feature(map_info, hero_pos, frame_state)
+        
+        # Global map feature
+        global_map_feat, newly_explored = self._update_global_map(map_info, hero_pos)
 
         # Legal action mask (16D) / 合法动作掩码
         legal_action = [1] * Config.ACTION_NUM
@@ -186,29 +190,35 @@ class Preprocessor:
                 monster_feats[0],
                 monster_feats[1],
                 organ_feat,
-                map_feat,
                 np.array(legal_action, dtype=np.float32),
                 progress_feat,
+                map_feat,
+                global_map_feat,
             ]
         )
 
         # Step reward / 即时奖励
         survive_reward = 0.03
+        
+        # 根据需求只保留躲避怪物和探索地图任务的奖励
         monster_dist_reward = (
             MONSTER_PROXIMITY_WEIGHT * (MONSTER_PROXIMITY_LAMBDA ** (self.last_min_monster_dist - 1.0))
             - Config.GAMMA * MONSTER_PROXIMITY_WEIGHT * (MONSTER_PROXIMITY_LAMBDA ** (cur_min_monster_dist - 1.0))
         )
+        
+        # 每探索到一个全新的可行走/障碍格子，给予 0.002 分
+        explore_reward = newly_explored * 0.002
 
         # Reward for moving closer to targets / 接近宝箱和buff奖励
-        treasure_close_reward = (
-            Config.GAMMA * TREASURE_PROXIMITY_WEIGHT * (TREASURE_PROXIMITY_LAMBDA ** (nearest_treasure_dist - 1.0))
-            - TREASURE_PROXIMITY_WEIGHT
-            * (TREASURE_PROXIMITY_LAMBDA ** (self.last_nearest_treasure_dist - 1.0))
-        )
-        buff_close_reward = (
-            Config.GAMMA * BUFF_PROXIMITY_WEIGHT * (BUFF_PROXIMITY_LAMBDA ** (nearest_buff_dist - 1.0))
-            - BUFF_PROXIMITY_WEIGHT * (BUFF_PROXIMITY_LAMBDA ** (self.last_nearest_buff_dist - 1.0))
-        )
+        # treasure_close_reward = (
+        #     Config.GAMMA * TREASURE_PROXIMITY_WEIGHT * (TREASURE_PROXIMITY_LAMBDA ** (nearest_treasure_dist - 1.0))
+        #     - TREASURE_PROXIMITY_WEIGHT
+        #     * (TREASURE_PROXIMITY_LAMBDA ** (self.last_nearest_treasure_dist - 1.0))
+        # )
+        # buff_close_reward = (
+        #     Config.GAMMA * BUFF_PROXIMITY_WEIGHT * (BUFF_PROXIMITY_LAMBDA ** (nearest_buff_dist - 1.0))
+        #     - BUFF_PROXIMITY_WEIGHT * (BUFF_PROXIMITY_LAMBDA ** (self.last_nearest_buff_dist - 1.0))
+        # )
 
         if self.last_treasures_collected is None:
             self.last_treasures_collected = treasures_collected
@@ -246,12 +256,7 @@ class Preprocessor:
         self.prev_legal_action = list(legal_action)
 
         reward = [
-            survive_reward
-            + monster_dist_reward
-            + treasure_close_reward
-            + buff_close_reward
-            + pickup_reward
-            + action_penalty
+            survive_reward + monster_dist_reward + explore_reward + pickup_reward + action_penalty
         ]
 
         return feature, legal_action, reward
@@ -350,3 +355,35 @@ class Preprocessor:
                 map_feat[2, t_row, t_col] = 1.0
 
         return map_feat.reshape(-1)
+
+    def _update_global_map(self, map_info, hero_pos):
+        if map_info is None:
+            return self.global_map.reshape(-1), 0
+
+        try:
+            src_h = len(map_info)
+        except TypeError:
+            return self.global_map.reshape(-1), 0
+
+        src_w = len(map_info[0]) if src_h > 0 else 0
+        if src_h == 0 or src_w == 0:
+            return self.global_map.reshape(-1), 0
+
+        view_radius = Config.MAP_VIEW_RADIUS
+        center_row = int(round(float(hero_pos["z"])))
+        center_col = int(round(float(hero_pos["x"])))
+        
+        newly_explored = 0
+        for row in range(src_h):
+            global_row = center_row - view_radius + row
+            if not (0 <= global_row < 128):
+                continue
+            for col in range(src_w):
+                global_col = center_col - view_radius + col
+                if 0 <= global_col < 128:
+                    if self.global_map[global_row, global_col] == -1.0:
+                        newly_explored += 1
+                    cell = map_info[row][col]
+                    self.global_map[global_row, global_col] = float(cell != 0)
+
+        return self.global_map.reshape(-1), newly_explored
