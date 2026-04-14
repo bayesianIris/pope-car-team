@@ -196,17 +196,17 @@ class Preprocessor:
         survive_reward = 0.03
         monster_dist_reward = (
             MONSTER_PROXIMITY_WEIGHT * (MONSTER_PROXIMITY_LAMBDA ** (self.last_min_monster_dist - 1.0))
-            - MONSTER_PROXIMITY_WEIGHT * (MONSTER_PROXIMITY_LAMBDA ** (cur_min_monster_dist - 1.0))
+            - Config.GAMMA * MONSTER_PROXIMITY_WEIGHT * (MONSTER_PROXIMITY_LAMBDA ** (cur_min_monster_dist - 1.0))
         )
 
         # Reward for moving closer to targets / 接近宝箱和buff奖励
         treasure_close_reward = (
-            TREASURE_PROXIMITY_WEIGHT * (TREASURE_PROXIMITY_LAMBDA ** (nearest_treasure_dist - 1.0))
+            Config.GAMMA * TREASURE_PROXIMITY_WEIGHT * (TREASURE_PROXIMITY_LAMBDA ** (nearest_treasure_dist - 1.0))
             - TREASURE_PROXIMITY_WEIGHT
             * (TREASURE_PROXIMITY_LAMBDA ** (self.last_nearest_treasure_dist - 1.0))
         )
         buff_close_reward = (
-            BUFF_PROXIMITY_WEIGHT * (BUFF_PROXIMITY_LAMBDA ** (nearest_buff_dist - 1.0))
+            Config.GAMMA * BUFF_PROXIMITY_WEIGHT * (BUFF_PROXIMITY_LAMBDA ** (nearest_buff_dist - 1.0))
             - BUFF_PROXIMITY_WEIGHT * (BUFF_PROXIMITY_LAMBDA ** (self.last_nearest_buff_dist - 1.0))
         )
 
