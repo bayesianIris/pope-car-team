@@ -13,14 +13,15 @@ Configuration for Gorge Chase PPO.
 
 class Config:
 
-    # Feature dimensions / 特征维度（共457维）
+    # Feature dimensions / 特征维度（共546维）
     FEATURES = [
         4,
         5,
         5,
+        72,
         441,
         16,
-        2,
+        3,
     ]
     FEATURE_SPLIT_SHAPE = FEATURES
     FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)

@@ -11,6 +11,7 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 """
 
 import numpy as np
+from agent_ppo.conf.conf import Config
 
 # Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
@@ -18,6 +19,10 @@ MAP_SIZE = 128.0
 MAX_MONSTER_SPEED = 5.0
 # Max distance bucket / 距离桶最大值
 MAX_DIST_BUCKET = 5.0
+# Max relative direction enum / 最大相对方向枚举值
+MAX_REL_DIR = 8.0
+# Organ feature width / 单个物件特征维度
+ORGAN_FEAT_DIM = 6
 # Max flash cooldown / 最大闪现冷却步数
 MAX_FLASH_CD = 2000.0
 # Max buff duration / buff最大持续时间
@@ -26,6 +31,10 @@ MAX_BUFF_DURATION = 50.0
 ACTION_DIM = 16
 # Local map window size (player centered) / 局部地图窗口边长（玩家居中）
 LOCAL_MAP_WIN_SIZE = 21
+# Reward for each newly collected treasure / 每新增一个宝箱的奖励
+TREASURE_INC_REWARD = 0.66
+# Reward for each newly collected buff / 每新增一个buff的奖励
+BUFF_INC_REWARD = 0.4
 
 
 def _norm(v, v_max, v_min=0.0):
@@ -45,6 +54,8 @@ class Preprocessor:
         self.step_no = 0
         self.max_step = 200
         self.last_min_monster_dist_norm = 0.5
+        self.last_treasures_collected = 0
+        self.last_collected_buff = 0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -59,6 +70,8 @@ class Preprocessor:
 
         self.step_no = observation["step_no"]
         self.max_step = env_info.get("max_step", 200)
+        cur_treasures_collected = int(env_info.get("treasures_collected", 0))
+        cur_collected_buff = int(env_info.get("collected_buff", 0))
 
         # Hero self features (4D) / 英雄自身特征
         hero = frame_state["heroes"]
@@ -97,6 +110,32 @@ class Preprocessor:
             else:
                 monster_feats.append(np.zeros(5, dtype=np.float32))
 
+        # Organ features (6D x N slots) / 物件特征
+        # [sub_type, status, x, z, euclidean_dist, rel_dir]
+        organs = frame_state.get("organs", [])
+        organ_feat = np.zeros(Config.FEATURES[3], dtype=np.float32)
+        organ_slot_num = len(organ_feat) // ORGAN_FEAT_DIM
+        if organs:
+            # Use stable order to reduce feature jitter across steps.
+            sorted_organs = sorted(organs, key=lambda o: int(o.get("config_id", 0)))
+            for idx, organ in enumerate(sorted_organs[:organ_slot_num]):
+                o_pos = organ.get("pos", {})
+                ox = float(o_pos.get("x", 0))
+                oz = float(o_pos.get("z", 0))
+                raw_dist = np.sqrt((hero_pos["x"] - ox) ** 2 + (hero_pos["z"] - oz) ** 2)
+                base = idx * ORGAN_FEAT_DIM
+                organ_feat[base : base + ORGAN_FEAT_DIM] = np.array(
+                    [
+                        _norm(organ.get("sub_type", 0), 2.0),
+                        _norm(organ.get("status", 0), 1.0),
+                        _norm(ox, MAP_SIZE),
+                        _norm(oz, MAP_SIZE),
+                        _norm(raw_dist, MAP_SIZE * 1.41),
+                        _norm(organ.get("hero_relative_direction", 0), MAX_REL_DIR),
+                    ],
+                    dtype=np.float32,
+                )
+
         # Local map features (21x21=441D) / 局部地图特征
         map_feat = np.zeros(LOCAL_MAP_WIN_SIZE * LOCAL_MAP_WIN_SIZE, dtype=np.float32)
         if map_info is not None and len(map_info) > 0:
@@ -122,10 +161,11 @@ class Preprocessor:
         if sum(legal_action) == 0:
             legal_action = [1] * ACTION_DIM
 
-        # Progress features (2D) / 进度特征
+        # Progress features (3D) / 进度特征
         step_norm = _norm(self.step_no, self.max_step)
         survival_ratio = step_norm
-        progress_feat = np.array([step_norm, survival_ratio], dtype=np.float32)
+        finished_steps_norm = _norm(env_info.get("finished_steps", self.step_no), self.max_step)
+        progress_feat = np.array([step_norm, survival_ratio, finished_steps_norm], dtype=np.float32)
 
         # Concatenate features / 拼接特征
         feature = np.concatenate(
@@ -133,6 +173,7 @@ class Preprocessor:
                 hero_feat,
                 monster_feats[0],
                 monster_feats[1],
+                organ_feat,
                 map_feat,
                 np.array(legal_action, dtype=np.float32),
                 progress_feat,
@@ -147,9 +188,14 @@ class Preprocessor:
 
         survive_reward = 0.01
         dist_shaping = 0.1 * (cur_min_dist_norm - self.last_min_monster_dist_norm)
+        treasure_inc = max(0, cur_treasures_collected - self.last_treasures_collected)
+        buff_inc = max(0, cur_collected_buff - self.last_collected_buff)
+        collection_reward = TREASURE_INC_REWARD * treasure_inc + BUFF_INC_REWARD * buff_inc
 
         self.last_min_monster_dist_norm = cur_min_dist_norm
+        self.last_treasures_collected = cur_treasures_collected
+        self.last_collected_buff = cur_collected_buff
 
-        reward = [survive_reward + dist_shaping]
+        reward = [survive_reward + dist_shaping + collection_reward]
 
         return feature, legal_action, reward
