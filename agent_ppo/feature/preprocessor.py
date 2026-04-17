@@ -28,13 +28,6 @@ MAX_BUFF_DURATION = 50.0
 # Pickup rewards / 拾取奖励系数
 TREASURE_PICKUP_REWARD = 2.0
 BUFF_PICKUP_REWARD = 0.8
-# Proximity shaping weights / 接近目标奖励系数
-TREASURE_PROXIMITY_WEIGHT = 0.5
-TREASURE_PROXIMITY_LAMBDA = 0.5
-BUFF_PROXIMITY_WEIGHT = TREASURE_PROXIMITY_WEIGHT * 0.8 / 2
-BUFF_PROXIMITY_LAMBDA = 0.5
-MONSTER_PROXIMITY_WEIGHT = 2.0  # Increased base weight
-MONSTER_PROXIMITY_LAMBDA = 0.85 # Fades much slower, giving strong signal from afar
 MONSTER_UNSEEN_DISTANCE = 12.0
 
 
@@ -71,7 +64,6 @@ class Preprocessor:
         self.last_treasures_collected = None
         self.last_buffs_collected = None
         self.prev_hero_pos = None
-        self.prev_legal_action = None
         self.global_map = np.full((128, 128), -1.0, dtype=np.float32)
 
     def feature_process(self, env_obs, last_action):
@@ -199,26 +191,9 @@ class Preprocessor:
 
         # Step reward / 即时奖励
         survive_reward = 0.03
-        
-        # 根据需求只保留躲避怪物和探索地图任务的奖励
-        monster_dist_reward = (
-            MONSTER_PROXIMITY_WEIGHT * (MONSTER_PROXIMITY_LAMBDA ** (self.last_min_monster_dist - 1.0))
-            - Config.GAMMA * MONSTER_PROXIMITY_WEIGHT * (MONSTER_PROXIMITY_LAMBDA ** (cur_min_monster_dist - 1.0))
-        )
-        
+
         # 每探索到一个全新的可行走/障碍格子，给予 0.002 分
         explore_reward = newly_explored * 0.002
-
-        # Reward for moving closer to targets / 接近宝箱和buff奖励
-        # treasure_close_reward = (
-        #     Config.GAMMA * TREASURE_PROXIMITY_WEIGHT * (TREASURE_PROXIMITY_LAMBDA ** (nearest_treasure_dist - 1.0))
-        #     - TREASURE_PROXIMITY_WEIGHT
-        #     * (TREASURE_PROXIMITY_LAMBDA ** (self.last_nearest_treasure_dist - 1.0))
-        # )
-        # buff_close_reward = (
-        #     Config.GAMMA * BUFF_PROXIMITY_WEIGHT * (BUFF_PROXIMITY_LAMBDA ** (nearest_buff_dist - 1.0))
-        #     - BUFF_PROXIMITY_WEIGHT * (BUFF_PROXIMITY_LAMBDA ** (self.last_nearest_buff_dist - 1.0))
-        # )
 
         if self.last_treasures_collected is None:
             self.last_treasures_collected = treasures_collected
@@ -232,19 +207,12 @@ class Preprocessor:
         # Action failure penalties / 动作失败惩罚
         action_penalty = 0.0
         if self.prev_hero_pos is not None and int(last_action) >= 0:
-            last_action_int = int(last_action)
-            was_legal = True
-            if self.prev_legal_action is not None and 0 <= last_action_int < len(self.prev_legal_action):
-                was_legal = bool(self.prev_legal_action[last_action_int])
-
             moved = (
                 int(hero_pos.get("x", 0)) != int(self.prev_hero_pos[0])
                 or int(hero_pos.get("z", 0)) != int(self.prev_hero_pos[1])
             )
 
-            if not was_legal:
-                action_penalty -= Config.ILLEGAL_ACTION_PENALTY
-            elif not moved:
+            if not moved:
                 action_penalty -= Config.ACTION_FAIL_PENALTY
 
         self.last_min_monster_dist = cur_min_monster_dist
@@ -253,10 +221,9 @@ class Preprocessor:
         self.last_treasures_collected = treasures_collected
         self.last_buffs_collected = buffs_collected
         self.prev_hero_pos = (int(hero_pos.get("x", 0)), int(hero_pos.get("z", 0)))
-        self.prev_legal_action = list(legal_action)
 
         reward = [
-            survive_reward + monster_dist_reward + explore_reward + pickup_reward + action_penalty
+            survive_reward + explore_reward + pickup_reward + action_penalty
         ]
 
         return feature, legal_action, reward
