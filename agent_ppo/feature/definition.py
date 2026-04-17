@@ -11,17 +11,17 @@ Data definitions, GAE computation for Gorge Chase PPO.
 """
 
 import numpy as np
-from common_python.utils.common_func import create_cls
+from common_python.utils.common_func import create_cls, attached
 from agent_ppo.conf.conf import Config
 
 
-# ObsData: feature=vector + flattened map image, legal_action=16D mask / 标量特征 + 地图展平特征 + 合法动作掩码
+# ObsData: feature=40D vector, legal_action=8D mask / 特征向量与合法动作掩码
 ObsData = create_cls("ObsData", feature=None, legal_action=None)
 
 # ActData: action, d_action(greedy), prob, value / 动作、贪心动作、概率、价值
 ActData = create_cls("ActData", action=None, d_action=None, prob=None, value=None)
 
-# SampleData: single-frame sample with flattened vector + map image / 单帧样本（标量特征 + 地图图像展平）
+# SampleData: single-frame sample with int dims / 单帧样本（整数表示维度）
 SampleData = create_cls(
     "SampleData",
     obs=Config.DIM_OF_OBSERVATION,

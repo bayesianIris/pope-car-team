@@ -60,7 +60,6 @@ class EpisodeRunner:
         self.episode_cnt = 0
         self.last_report_monitor_time = 0
         self.last_get_training_metrics_time = 0
-        logger.info(env)
 
     def run_episodes(self):
         """Run a single episode and yield collected samples.
