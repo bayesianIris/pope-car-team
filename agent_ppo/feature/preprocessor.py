@@ -161,8 +161,8 @@ class Preprocessor:
         # Full map view for CNN / 地图全视野 CNN 输入
         map_feat = self._build_map_feature(map_info, hero_pos, frame_state)
         
-        # Global map feature
-        global_map_feat, newly_explored = self._update_global_map(map_info, hero_pos)
+        # Directional fog features / 四方向迷雾占比特征
+        global_map_feat, newly_explored = self._update_directional_fog_feature(map_info, hero_pos)
 
         # Legal action mask (16D) / 合法动作掩码
         legal_action = [1] * Config.ACTION_NUM
@@ -387,3 +387,65 @@ class Preprocessor:
                     self.global_map[global_row, global_col] = float(cell != 0)
 
         return self.global_map.reshape(-1), newly_explored
+
+    def _update_directional_fog_feature(self, map_info, hero_pos):
+        """Update explored map cache and build four directional fog ratios.
+
+        更新已探索地图缓存，并构造上下左右四个方向的迷雾占比特征。
+        """
+        if map_info is None:
+            return np.zeros(4, dtype=np.float32), 0
+
+        try:
+            src_h = len(map_info)
+        except TypeError:
+            return np.zeros(4, dtype=np.float32), 0
+
+        src_w = len(map_info[0]) if src_h > 0 else 0
+        if src_h == 0 or src_w == 0:
+            return np.zeros(4, dtype=np.float32), 0
+
+        view_radius = Config.MAP_VIEW_RADIUS
+        hero_x = int(round(float(hero_pos.get("x", 0))))
+        hero_z = int(round(float(hero_pos.get("z", 0))))
+
+        # Update explored cache with current visible map / 用当前可见地图更新已探索缓存
+        newly_explored = 0
+        for row in range(src_h):
+            global_row = hero_z - view_radius + row
+            if not (0 <= global_row < 128):
+                continue
+            for col in range(src_w):
+                global_col = hero_x - view_radius + col
+                if 0 <= global_col < 128:
+                    if self.global_map[global_row, global_col] == -1.0:
+                        newly_explored += 1
+                    cell = map_info[row][col]
+                    self.global_map[global_row, global_col] = float(cell != 0)
+
+        def fog_ratio(row_start, row_end, col_start, col_end):
+            row_start = max(0, row_start)
+            row_end = min(128, row_end)
+            col_start = max(0, col_start)
+            col_end = min(128, col_end)
+            if row_end <= row_start or col_end <= col_start:
+                return 0.0
+            area = self.global_map[row_start:row_end, col_start:col_end]
+            return float(np.mean(area == -1.0))
+
+        top = hero_z - view_radius
+        bottom = hero_z + view_radius + 1
+        left = hero_x - view_radius
+        right = hero_x + view_radius + 1
+
+        fog_feat = np.array(
+            [
+                fog_ratio(0, top, left, right),
+                fog_ratio(bottom, 128, left, right),
+                fog_ratio(top, bottom, 0, left),
+                fog_ratio(top, bottom, right, 128),
+            ],
+            dtype=np.float32,
+        )
+
+        return fog_feat, newly_explored

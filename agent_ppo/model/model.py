@@ -18,7 +18,7 @@ import torch.nn as nn
 from agent_ppo.conf.conf import Config
 
 
-def make_fc_layer(in_features, out_features, gain=math.sqrt(2.0)):
+def make_fc_layer(in_features, out_features, gain=1.4142135623730951):
     """Create a linear layer with orthogonal initialization.
 
     创建正交初始化的线性层。
@@ -41,30 +41,10 @@ def make_conv_layer(in_channels, out_channels, kernel_size=3, stride=1, padding=
     return conv
 
 
-class ResidualBlock(nn.Module):
-    """Simple residual block for map feature extraction.
-
-    用于地图特征提取的轻量残差块。
-    """
-
-    def __init__(self, channels):
-        super().__init__()
-        self.conv1 = make_conv_layer(channels, channels, kernel_size=3, stride=1, padding=1)
-        self.act1 = nn.ReLU()
-        self.conv2 = make_conv_layer(channels, channels, kernel_size=3, stride=1, padding=1)
-        self.act2 = nn.ReLU()
-
-    def forward(self, x):
-        identity = x
-        out = self.act1(self.conv1(x))
-        out = self.conv2(out)
-        return self.act2(out + identity)
-
-
 class Model(nn.Module):
-    """Enhanced PPO model with map residual CNN and dual towers.
+    """Lightweight PPO model with local-map CNN and dual towers.
 
-    增强版 PPO 网络：残差地图 CNN + 向量编码 + Actor/Critic 分塔。
+    轻量版 PPO 网络：局部地图 CNN + 向量编码 + Actor/Critic 分塔。
     """
 
     def __init__(self, device=None):
@@ -74,39 +54,35 @@ class Model(nn.Module):
 
         self.vector_dim = Config.FEATURE_VECTOR_LEN
         self.map_channels, self.map_height, self.map_width = Config.FEATURE_IMAGE_SHAPE
-        self.global_map_channels, self.global_map_height, self.global_map_width = Config.GLOBAL_MAP_SHAPE
-        map_hidden_dim = 96
-        global_map_hidden_dim = 64
-        vector_hidden_dim = 128
-        fusion_hidden_dim = 256
-        tower_hidden_dim = 128
+        self.map_dim = self.map_channels * self.map_height * self.map_width
+        map_hidden_dim = 32
+        global_feature_hidden_dim = 8
+        vector_hidden_dim = 64
+        fusion_hidden_dim = 96
+        tower_hidden_dim = 64
         action_num = Config.ACTION_NUM
         value_num = Config.VALUE_NUM
 
         # Map encoder / 地图编码器
         self.map_encoder = nn.Sequential(
-            make_conv_layer(self.map_channels, 32, kernel_size=3, stride=1, padding=1),
+            make_conv_layer(self.map_channels, 8, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            ResidualBlock(32),
-            make_conv_layer(32, 64, kernel_size=3, stride=1, padding=1),
-            nn.ReLU(),
-            ResidualBlock(64),
-            make_conv_layer(64, map_hidden_dim, kernel_size=3, stride=2, padding=1),
+            make_conv_layer(8, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.AdaptiveAvgPool2d((1, 1)),
         )
 
-        # Global Map encoder
-        self.global_map_encoder = nn.Sequential(
-            make_conv_layer(self.global_map_channels, 16, kernel_size=5, stride=2, padding=2),
+        self.map_projector = nn.Sequential(
+            make_fc_layer(16, map_hidden_dim),
             nn.ReLU(),
-            make_conv_layer(16, 32, kernel_size=3, stride=2, padding=1),
+            nn.LayerNorm(map_hidden_dim),
+        )
+
+        # Global context encoder / 全局上下文编码器
+        self.global_feature_encoder = nn.Sequential(
+            make_fc_layer(Config.GLOBAL_MAP_LEN, global_feature_hidden_dim),
             nn.ReLU(),
-            make_conv_layer(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            make_conv_layer(64, global_map_hidden_dim, kernel_size=3, stride=2, padding=1),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.LayerNorm(global_feature_hidden_dim),
         )
 
         # Vector encoder / 标量编码器
@@ -118,7 +94,7 @@ class Model(nn.Module):
 
         # Fusion backbone / 融合骨干网络
         self.fusion_backbone = nn.Sequential(
-            make_fc_layer(vector_hidden_dim + map_hidden_dim + global_map_hidden_dim, fusion_hidden_dim),
+            make_fc_layer(vector_hidden_dim + map_hidden_dim + global_feature_hidden_dim, fusion_hidden_dim),
             nn.ReLU(),
             nn.LayerNorm(fusion_hidden_dim),
         )
@@ -143,15 +119,16 @@ class Model(nn.Module):
     def forward(self, obs, inference=False):
         vector_obs = obs[:, : self.vector_dim]
         
-        map_offset = self.vector_dim + self.map_channels * self.map_height * self.map_width
+        map_offset = self.vector_dim + self.map_dim
         map_obs = obs[:, self.vector_dim : map_offset].view(-1, self.map_channels, self.map_height, self.map_width)
-        global_map_obs = obs[:, map_offset : map_offset + self.global_map_channels * self.global_map_height * self.global_map_width].view(-1, self.global_map_channels, self.global_map_height, self.global_map_width)
+        global_feature_obs = obs[:, map_offset : map_offset + Config.GLOBAL_MAP_LEN]
 
         vector_hidden = self.vector_encoder(vector_obs)
         map_hidden = self.map_encoder(map_obs).flatten(start_dim=1)
-        global_map_hidden = self.global_map_encoder(global_map_obs).flatten(start_dim=1)
+        map_hidden = self.map_projector(map_hidden)
+        global_feature_hidden = self.global_feature_encoder(global_feature_obs)
         
-        hidden = self.fusion_backbone(torch.cat([vector_hidden, map_hidden, global_map_hidden], dim=1))
+        hidden = self.fusion_backbone(torch.cat([vector_hidden, map_hidden, global_feature_hidden], dim=1))
 
         actor_hidden = self.actor_tower(hidden)
         critic_hidden = self.critic_tower(hidden)
