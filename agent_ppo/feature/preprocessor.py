@@ -171,30 +171,29 @@ class Preprocessor:
         else:
             organ_shaping = Config.GAMMA * organ_potential - self.last_organ_potential
 
-        # Local map features (21x21=441D) / 局部地图特征
-        map_feat = np.zeros(LOCAL_MAP_WIN_SIZE * LOCAL_MAP_WIN_SIZE, dtype=np.float32)
-        if map_info is not None and len(map_info) > 0:
+        # Local map features (16D) / 局部地图特征
+        map_feat = np.zeros(16, dtype=np.float32)
+        if map_info is not None and len(map_info) >= 13:
             center = len(map_info) // 2
-            radius = LOCAL_MAP_WIN_SIZE // 2
             flat_idx = 0
-            for row in range(center - radius, center + radius + 1):
-                for col in range(center - radius, center + radius + 1):
+            for row in range(center - 2, center + 2):
+                for col in range(center - 2, center + 2):
                     if 0 <= row < len(map_info) and 0 <= col < len(map_info[0]):
                         map_feat[flat_idx] = float(map_info[row][col] != 0)
                     flat_idx += 1
 
-        # Legal action mask (16D) / 合法动作掩码
-        legal_action = [1] * ACTION_DIM
+        # Legal action mask (8D) / 合法动作掩码
+        legal_action = [1] * 8
         if isinstance(legal_act_raw, list) and legal_act_raw:
             if isinstance(legal_act_raw[0], bool):
-                for j in range(min(ACTION_DIM, len(legal_act_raw))):
+                for j in range(min(8, len(legal_act_raw))):
                     legal_action[j] = int(legal_act_raw[j])
             else:
-                valid_set = {int(a) for a in legal_act_raw if int(a) < ACTION_DIM}
-                legal_action = [1 if j in valid_set else 0 for j in range(ACTION_DIM)]
+                valid_set = {int(a) for a in legal_act_raw if int(a) < 8}
+                legal_action = [1 if j in valid_set else 0 for j in range(8)]
 
         if sum(legal_action) == 0:
-            legal_action = [1] * ACTION_DIM
+            legal_action = [1] * 8
 
         # Progress features (3D) / 进度特征
         step_norm = _norm(self.step_no, self.max_step)
