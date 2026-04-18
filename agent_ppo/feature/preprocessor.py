@@ -35,14 +35,6 @@ LOCAL_MAP_WIN_SIZE = 21
 TREASURE_INC_REWARD = 0.66
 # Reward for each newly collected buff / 每新增一个buff的奖励
 BUFF_INC_REWARD = 0.4
-# Potential decay factor for organ shaping / 物件势能衰减系数（非线性，距离越远影响越小）
-ORGAN_POTENTIAL_DECAY = np.log(2.0)
-# Calibrate treasure shaping: when distance changes by 1 near target, reward ~= 0.1
-ORGAN_TREASURE_ONE_STEP_REWARD = 0.1
-ORGAN_POTENTIAL_SCALE = ORGAN_TREASURE_ONE_STEP_REWARD / (
-    Config.GAMMA - np.exp(-ORGAN_POTENTIAL_DECAY)
-) # DEBUG: AI写的，为啥乘以这个我不太明白，但是actually数值上影响不大，或许是为了凑0.1的整数
-BUFF_SHAPING_MULT = BUFF_INC_REWARD / TREASURE_INC_REWARD
 
 
 def _norm(v, v_max, v_min=0.0):
@@ -64,7 +56,6 @@ class Preprocessor:
         self.last_min_monster_dist_norm = 0.5
         self.last_treasures_collected = 0
         self.last_collected_buff = 0
-        self.last_organ_potential = None
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -145,31 +136,6 @@ class Preprocessor:
                     dtype=np.float32,
                 )
 
-        # Organ potential-based shaping / 物件势能差分奖励
-        # F(s,a,s') = gamma * Phi(s') - Phi(s)
-        # Phi(s) = sum_i [w_i * A * exp(-k * d_i)]
-        # Treasure: w=1; Buff: w=TREASURE_INC_REWARD/BUFF_INC_REWARD
-        organ_potential = 0.0
-        # Monotonic collected-count baseline keeps potential continuous at pickup,
-        # while staying in PBRS form and reducing pickup-time penalty artifacts.
-        organ_potential += ORGAN_POTENTIAL_SCALE * (
-            cur_treasures_collected + BUFF_SHAPING_MULT * cur_collected_buff
-        )
-        for organ in organs:
-            if int(organ.get("status", 0)) != 1:
-                continue
-            o_pos = organ.get("pos", {})
-            ox = float(o_pos.get("x", 0))
-            oz = float(o_pos.get("z", 0))
-            raw_dist = np.sqrt((hero_pos["x"] - ox) ** 2 + (hero_pos["z"] - oz) ** 2)
-            subtype = int(organ.get("sub_type", 0))
-            type_weight = BUFF_SHAPING_MULT if subtype == 2 else 1.0
-            organ_potential += type_weight * ORGAN_POTENTIAL_SCALE * np.exp(-ORGAN_POTENTIAL_DECAY * raw_dist)
-
-        if self.last_organ_potential is None:
-            organ_shaping = 0.0
-        else:
-            organ_shaping = Config.GAMMA * organ_potential - self.last_organ_potential
 
         # Local map features (16D) / 局部地图特征
         map_feat = np.zeros(16, dtype=np.float32)
@@ -229,8 +195,7 @@ class Preprocessor:
         self.last_min_monster_dist_norm = cur_min_dist_norm
         self.last_treasures_collected = cur_treasures_collected
         self.last_collected_buff = cur_collected_buff
-        self.last_organ_potential = organ_potential
 
-        reward = [survive_reward + dist_shaping + collection_reward + organ_shaping]
+        reward = [survive_reward + dist_shaping + collection_reward]
 
         return feature, legal_action, reward
