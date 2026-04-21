@@ -10,131 +10,111 @@ Neural network model for Gorge Chase PPO.
 峡谷追猎 PPO 神经网络模型。
 """
 
-import math
-
 import torch
 import torch.nn as nn
 
 from agent_ppo.conf.conf import Config
 
 
-def make_fc_layer(in_features, out_features, gain=1.4142135623730951):
+def make_fc_layer(in_features, out_features):
     """Create a linear layer with orthogonal initialization.
 
     创建正交初始化的线性层。
     """
     fc = nn.Linear(in_features, out_features)
-    nn.init.orthogonal_(fc.weight.data, gain=gain)
+    nn.init.orthogonal_(fc.weight.data)
     nn.init.zeros_(fc.bias.data)
     return fc
 
 
-def make_conv_layer(in_channels, out_channels, kernel_size=3, stride=1, padding=1):
-    """Create a conv2d layer with orthogonal initialization.
-
-    创建正交初始化的卷积层。
-    """
-    conv = nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding)
-    nn.init.orthogonal_(conv.weight.data, gain=math.sqrt(2.0))
-    if conv.bias is not None:
-        nn.init.zeros_(conv.bias.data)
-    return conv
-
-
 class Model(nn.Module):
-    """Lightweight PPO model with local-map CNN and dual towers.
+    """CNN map encoder + MLP vector encoder + Actor/Critic dual heads.
 
-    轻量版 PPO 网络：局部地图 CNN + 向量编码 + Actor/Critic 分塔。
+    地图 CNN 编码 + 向量 MLP 编码 + Actor/Critic 双头。
     """
 
     def __init__(self, device=None):
         super().__init__()
-        self.model_name = "gorge_chase_lite"
+        self.model_name = "gorge_chase_cnn"
         self.device = device
 
-        self.vector_dim = Config.FEATURE_VECTOR_LEN
-        self.map_channels, self.map_height, self.map_width = Config.FEATURE_IMAGE_SHAPE
-        self.map_dim = self.map_channels * self.map_height * self.map_width
-        map_hidden_dim = 32
-        global_feature_hidden_dim = 8
-        vector_hidden_dim = 64
-        fusion_hidden_dim = 96
-        tower_hidden_dim = 64
+        self.map_channels = 4
+        map_size = int((Config.FEATURES[5] // self.map_channels) ** 0.5)
+        self.map_h = map_size
+        self.map_w = map_size
+        self.map_dim = Config.FEATURES[5]
+        self.vec_dim = Config.DIM_OF_OBSERVATION - self.map_dim
+
+        vec_hidden_dim = 128
+        fused_dim = 128
         action_num = Config.ACTION_NUM
         value_num = Config.VALUE_NUM
 
-        # Map encoder / 地图编码器
+        # Vector branch / 向量分支
+        self.vec_encoder = nn.Sequential(
+            make_fc_layer(self.vec_dim, vec_hidden_dim),
+            nn.ReLU(),
+            make_fc_layer(vec_hidden_dim, vec_hidden_dim),
+            nn.ReLU(),
+        )
+
+        # Map branch / 地图分支
         self.map_encoder = nn.Sequential(
-            make_conv_layer(self.map_channels, 8, kernel_size=3, stride=1, padding=1),
+            nn.Conv2d(self.map_channels, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            make_conv_layer(8, 16, kernel_size=3, stride=1, padding=1),
+            nn.MaxPool2d(kernel_size=2, stride=2),  # 21 -> 10
+            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.MaxPool2d(kernel_size=2, stride=2),  # 10 -> 5
         )
 
-        self.map_projector = nn.Sequential(
-            make_fc_layer(16, map_hidden_dim),
-            nn.ReLU(),
-            nn.LayerNorm(map_hidden_dim),
-        )
-
-        # Global context encoder / 全局上下文编码器
-        self.global_feature_encoder = nn.Sequential(
-            make_fc_layer(Config.GLOBAL_MAP_LEN, global_feature_hidden_dim),
-            nn.ReLU(),
-            nn.LayerNorm(global_feature_hidden_dim),
-        )
-
-        # Vector encoder / 标量编码器
-        self.vector_encoder = nn.Sequential(
-            make_fc_layer(self.vector_dim, vector_hidden_dim),
-            nn.ReLU(),
-            nn.LayerNorm(vector_hidden_dim),
-        )
-
-        # Fusion backbone / 融合骨干网络
-        self.fusion_backbone = nn.Sequential(
-            make_fc_layer(vector_hidden_dim + map_hidden_dim + global_feature_hidden_dim, fusion_hidden_dim),
-            nn.ReLU(),
-            nn.LayerNorm(fusion_hidden_dim),
-        )
-
-        # Actor/Critic towers / 策略与价值分塔
-        self.actor_tower = nn.Sequential(
-            make_fc_layer(fusion_hidden_dim, tower_hidden_dim),
+        map_out_dim = 32 * 5 * 5
+        self.map_proj = nn.Sequential(
+            make_fc_layer(map_out_dim, vec_hidden_dim),
             nn.ReLU(),
         )
 
-        self.critic_tower = nn.Sequential(
-            make_fc_layer(fusion_hidden_dim, tower_hidden_dim),
+        # Fusion backbone / 融合骨干
+        self.fusion = nn.Sequential(
+            make_fc_layer(vec_hidden_dim * 2, fused_dim),
             nn.ReLU(),
         )
 
         # Actor head / 策略头
-        self.actor_head = make_fc_layer(tower_hidden_dim, action_num, gain=0.01)
+        self.actor_head = make_fc_layer(fused_dim, action_num)
 
         # Critic head / 价值头
-        self.critic_head = make_fc_layer(tower_hidden_dim, value_num, gain=1.0)
+        self.critic_head = make_fc_layer(fused_dim, value_num)
+
+    def _split_obs(self, obs):
+        """Split flattened observation into vector part and 21x21 map part.
+
+        将展平观测拆分为向量部分和 21x21 地图部分。
+        """
+        # Feature layout: [4,6,6,4,4,4*21*21,16,2], map is the 6th segment.
+        map_start = sum(Config.FEATURES[:5])
+        map_end = map_start + self.map_dim
+
+        vec_left = obs[:, :map_start]
+        map_flat = obs[:, map_start:map_end]
+        vec_right = obs[:, map_end:]
+        vec = torch.cat([vec_left, vec_right], dim=1)
+        map_tensor = map_flat.view(-1, self.map_channels, self.map_h, self.map_w)
+        return vec, map_tensor
 
     def forward(self, obs, inference=False):
-        vector_obs = obs[:, : self.vector_dim]
-        
-        map_offset = self.vector_dim + self.map_dim
-        map_obs = obs[:, self.vector_dim : map_offset].view(-1, self.map_channels, self.map_height, self.map_width)
-        global_feature_obs = obs[:, map_offset : map_offset + Config.GLOBAL_MAP_LEN]
+        vec_obs, map_obs = self._split_obs(obs)
 
-        vector_hidden = self.vector_encoder(vector_obs)
-        map_hidden = self.map_encoder(map_obs).flatten(start_dim=1)
-        map_hidden = self.map_projector(map_hidden)
-        global_feature_hidden = self.global_feature_encoder(global_feature_obs)
-        
-        hidden = self.fusion_backbone(torch.cat([vector_hidden, map_hidden, global_feature_hidden], dim=1))
+        vec_hidden = self.vec_encoder(vec_obs)
 
-        actor_hidden = self.actor_tower(hidden)
-        critic_hidden = self.critic_tower(hidden)
+        map_hidden = self.map_encoder(map_obs)
+        map_hidden = map_hidden.flatten(start_dim=1)
+        map_hidden = self.map_proj(map_hidden)
 
-        logits = self.actor_head(actor_hidden)
-        value = self.critic_head(critic_hidden)
+        hidden = self.fusion(torch.cat([vec_hidden, map_hidden], dim=1))
+
+        logits = self.actor_head(hidden)
+        value = self.critic_head(hidden)
         return logits, value
 
     def set_train_mode(self):

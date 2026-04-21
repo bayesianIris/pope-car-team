@@ -13,38 +13,25 @@ Configuration for Gorge Chase PPO.
 
 class Config:
 
-    # Scalar feature dimensions / 标量特征维度
+    # Feature dimensions / 特征维度（共1806维）
+    # [hero4, monster1_6, monster2_6, nearest_treasure4, nearest_buff4,
+    #  local_maps_4x21x21, legal_action16, progress2]
     FEATURES = [
         4,
-        5,
-        5,
-        8,
+        6,
+        6,
+        4,
+        4,
+        4 * 21 * 21,
         16,
         2,
     ]
     FEATURE_SPLIT_SHAPE = FEATURES
-    FEATURE_VECTOR_LEN = sum(FEATURE_SPLIT_SHAPE)
+    FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)
+    DIM_OF_OBSERVATION = FEATURE_LEN
 
-    # Map CNN input / 地图 CNN 输入
-    MAP_VIEW_RADIUS = 10
-    MAP_VIEW_SIZE = MAP_VIEW_RADIUS * 2 + 1
-    MAP_CHANNELS = 3
-    MAP_DEFAULT_VALUE = 0.0
-    FEATURE_IMAGE_SHAPE = (MAP_CHANNELS, MAP_VIEW_SIZE, MAP_VIEW_SIZE)
-    FEATURE_IMAGE_LEN = MAP_CHANNELS * MAP_VIEW_SIZE * MAP_VIEW_SIZE
-
-    # Global context features / 全局上下文特征
-    GLOBAL_FOG_FEATURES = 4
-    GLOBAL_MAP_LEN = GLOBAL_FOG_FEATURES
-
-    DIM_OF_OBSERVATION = FEATURE_VECTOR_LEN + FEATURE_IMAGE_LEN + GLOBAL_MAP_LEN
-
-    # Action space / 动作空间：16维（8移动 + 8闪现）
+    # Action space / 动作空间：16维（8个移动 + 8个闪现）
     ACTION_NUM = 16
-
-    # Action penalties / 动作惩罚
-    ACTION_FAIL_PENALTY = 0.30
-    ILLEGAL_ACTION_PENALTY = 0.30
 
     # Value head / 价值头：单头生存奖励
     VALUE_NUM = 1
