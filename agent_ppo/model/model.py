@@ -39,6 +39,8 @@ class Model(nn.Module):
         self.device = device
 
         self.map_channels = 4
+        self.terrain_channels = 1
+        self.poi_channels = self.map_channels - self.terrain_channels
         map_size = int((Config.FEATURES[5] // self.map_channels) ** 0.5)
         self.map_h = map_size
         self.map_w = map_size
@@ -58,9 +60,9 @@ class Model(nn.Module):
             nn.ReLU(),
         )
 
-        # Map branch / 地图分支
-        self.map_encoder = nn.Sequential(
-            nn.Conv2d(self.map_channels, 16, kernel_size=3, stride=1, padding=1),
+        # Terrain map branch / 地形地图分支
+        self.terrain_encoder = nn.Sequential(
+            nn.Conv2d(self.terrain_channels, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
             nn.MaxPool2d(kernel_size=2, stride=2),  # 21 -> 10
             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
@@ -68,15 +70,29 @@ class Model(nn.Module):
             nn.MaxPool2d(kernel_size=2, stride=2),  # 10 -> 5
         )
 
-        map_out_dim = 32 * 5 * 5
-        self.map_proj = nn.Sequential(
-            make_fc_layer(map_out_dim, vec_hidden_dim),
+        # POI map branch / 兴趣点地图分支（treasure + buff + monster）
+        self.poi_encoder = nn.Sequential(
+            nn.Conv2d(self.poi_channels, 16, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),  # 21 -> 10
+            nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.MaxPool2d(kernel_size=2, stride=2),  # 10 -> 5
+        )
+
+        branch_out_dim = 32 * 5 * 5
+        self.terrain_proj = nn.Sequential(
+            make_fc_layer(branch_out_dim, vec_hidden_dim),
+            nn.ReLU(),
+        )
+        self.poi_proj = nn.Sequential(
+            make_fc_layer(branch_out_dim, vec_hidden_dim),
             nn.ReLU(),
         )
 
         # Fusion backbone / 融合骨干
         self.fusion = nn.Sequential(
-            make_fc_layer(vec_hidden_dim * 2, fused_dim),
+            make_fc_layer(vec_hidden_dim * 3, fused_dim),
             nn.ReLU(),
         )
 
@@ -107,11 +123,18 @@ class Model(nn.Module):
 
         vec_hidden = self.vec_encoder(vec_obs)
 
-        map_hidden = self.map_encoder(map_obs)
-        map_hidden = map_hidden.flatten(start_dim=1)
-        map_hidden = self.map_proj(map_hidden)
+        terrain_obs = map_obs[:, : self.terrain_channels, :, :]
+        poi_obs = map_obs[:, self.terrain_channels :, :, :]
 
-        hidden = self.fusion(torch.cat([vec_hidden, map_hidden], dim=1))
+        terrain_hidden = self.terrain_encoder(terrain_obs)
+        terrain_hidden = terrain_hidden.flatten(start_dim=1)
+        terrain_hidden = self.terrain_proj(terrain_hidden)
+
+        poi_hidden = self.poi_encoder(poi_obs)
+        poi_hidden = poi_hidden.flatten(start_dim=1)
+        poi_hidden = self.poi_proj(poi_hidden)
+
+        hidden = self.fusion(torch.cat([vec_hidden, terrain_hidden, poi_hidden], dim=1))
 
         logits = self.actor_head(hidden)
         value = self.critic_head(hidden)
