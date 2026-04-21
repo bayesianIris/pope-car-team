@@ -45,7 +45,7 @@ def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
             g_data.clear()
 
             now = time.time()
-            if now - last_save_model_time >= 1800:
+            if now - last_save_model_time >= 10:
                 agent.save_model()
                 last_save_model_time = now
 

@@ -326,7 +326,7 @@ class Preprocessor:
     def _nearest_monster_dist(self, hero_pos, visible_monsters):
         if not visible_monsters:
             return 30.0
-        return min(self._dist(hero_pos, m["pos"]) for m in visible_monsters)
+        return min(self._path_dist_or_euclid(hero_pos, m["pos"]) for m in visible_monsters)
 
     def _greedy_scores(
         self,
@@ -367,7 +367,7 @@ class Preprocessor:
             away_vec = np.zeros(2, dtype=np.float32)
             nearest_after = 30.0
             for m in visible_monsters:
-                d_after = self._dist(new_pos, m["pos"])
+                d_after = self._path_dist_or_euclid(new_pos, m["pos"])
                 nearest_after = min(nearest_after, d_after)
 
                 threat = (1.2 + 0.3 * np.clip(m["speed"], 0.0, MAX_MONSTER_SPEED))
