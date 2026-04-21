@@ -11,9 +11,12 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 """
 
 import numpy as np
+from collections import deque
 from agent_ppo.conf.conf import Config
 
 MAP_SIZE = 128.0
+MAP_GRID_SIZE = 128
+UNKNOWN_CELL = -1
 MAX_MONSTER_SPEED = 5.0
 MAX_FLASH_CD = 2000.0
 MAX_BUFF_DURATION = 50.0
@@ -56,6 +59,165 @@ class Preprocessor:
         self.last_treasures_collected = 0
         self.last_collected_buff = 0
         self.last_target_dist = None
+
+        # Episode-scoped global occupancy map:
+        # -1 unknown, 0 blocked, 1 passable
+        self.global_map = np.full((MAP_GRID_SIZE, MAP_GRID_SIZE), UNKNOWN_CELL, dtype=np.int8)
+        self.global_seen = np.zeros((MAP_GRID_SIZE, MAP_GRID_SIZE), dtype=np.uint8)
+        self.global_map_revision = 0
+
+        # Cache of shortest-path distance fields keyed by source grid cell.
+        self._sp_cache_revision = -1
+        self._sp_cache = {}
+
+    def _world_to_grid(self, hero_pos):
+        """Project continuous world position (x, z) to global grid (row, col)."""
+        hx = int(np.clip(np.rint(float(hero_pos[0])), 0, MAP_GRID_SIZE - 1))
+        hz = int(np.clip(np.rint(float(hero_pos[1])), 0, MAP_GRID_SIZE - 1))
+        return hz, hx
+
+    def _update_global_map(self, hero_pos, map_info):
+        """Fuse local map_info into global 128x128 map with O(k^2) patch update.
+
+        map_info is expected to be the hero-centered local occupancy (typically 21x21).
+        """
+        if map_info is None or len(map_info) == 0:
+            return 0
+
+        local = np.asarray(map_info, dtype=np.int8)
+        if local.ndim != 2:
+            return 0
+
+        local_bin = (local != 0).astype(np.int8)
+        h, w = int(local_bin.shape[0]), int(local_bin.shape[1])
+        if h <= 0 or w <= 0:
+            return 0
+
+        hero_r, hero_c = self._world_to_grid(hero_pos)
+        center_r, center_c = h // 2, w // 2
+
+        r0, c0 = hero_r - center_r, hero_c - center_c
+        r1, c1 = r0 + h, c0 + w
+
+        gr0, gc0 = max(0, r0), max(0, c0)
+        gr1, gc1 = min(MAP_GRID_SIZE, r1), min(MAP_GRID_SIZE, c1)
+        if gr0 >= gr1 or gc0 >= gc1:
+            return 0
+
+        lr0, lc0 = gr0 - r0, gc0 - c0
+        lr1, lc1 = lr0 + (gr1 - gr0), lc0 + (gc1 - gc0)
+        patch = local_bin[lr0:lr1, lc0:lc1]
+
+        target = self.global_map[gr0:gr1, gc0:gc1]
+        changed = int(np.count_nonzero(target != patch))
+        if changed > 0:
+            target[...] = patch
+            self.global_seen[gr0:gr1, gc0:gc1] = 1
+            self.global_map_revision += 1
+
+        return changed
+
+    def _is_global_cell_observable_passable(self, r, c):
+        if r < 0 or c < 0 or r >= MAP_GRID_SIZE or c >= MAP_GRID_SIZE:
+            return False
+        return bool(self.global_seen[r, c] > 0 and self.global_map[r, c] == 1)
+
+    def _neighbor8(self, r, c):
+        for dz in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                if dz == 0 and dx == 0:
+                    continue
+                nr, nc = r + dz, c + dx
+                if 0 <= nr < MAP_GRID_SIZE and 0 <= nc < MAP_GRID_SIZE:
+                    yield nr, nc
+
+    def _get_distance_field(self, source_pos):
+        """Return cached BFS distance field from source on observed-passable cells."""
+        if source_pos is None:
+            return None
+
+        if self._sp_cache_revision != self.global_map_revision:
+            self._sp_cache_revision = self.global_map_revision
+            self._sp_cache.clear()
+
+        src_r, src_c = self._world_to_grid(source_pos)
+        key = (src_r, src_c)
+        if key in self._sp_cache:
+            return self._sp_cache[key]
+
+        if not self._is_global_cell_observable_passable(src_r, src_c):
+            return None
+
+        dist = np.full((MAP_GRID_SIZE, MAP_GRID_SIZE), -1, dtype=np.int16)
+        q = deque()
+        dist[src_r, src_c] = 0
+        q.append((src_r, src_c))
+
+        while q:
+            r, c = q.popleft()
+            d = int(dist[r, c])
+            for nr, nc in self._neighbor8(r, c):
+                if dist[nr, nc] >= 0:
+                    continue
+                if not self._is_global_cell_observable_passable(nr, nc):
+                    continue
+                dist[nr, nc] = d + 1
+                q.append((nr, nc))
+
+        # Keep cache small but effective for repeated monster/target queries.
+        if len(self._sp_cache) >= 8:
+            self._sp_cache.pop(next(iter(self._sp_cache)))
+        self._sp_cache[key] = dist
+        return dist
+
+    def _shortest_path_dist_observed(self, from_pos, to_pos):
+        """Observed-map shortest path distance. Return None if path is not observable."""
+        if from_pos is None or to_pos is None:
+            return None
+
+        dist_field = self._get_distance_field(to_pos)
+        if dist_field is None:
+            return None
+
+        fr, fc = self._world_to_grid(from_pos)
+        if fr < 0 or fc < 0 or fr >= MAP_GRID_SIZE or fc >= MAP_GRID_SIZE:
+            return None
+
+        d = int(dist_field[fr, fc])
+        if d < 0:
+            return None
+        return float(d)
+
+    def _path_dist_or_euclid(self, p1, p2):
+        d_sp = self._shortest_path_dist_observed(p1, p2)
+        if d_sp is not None:
+            return d_sp
+        return self._dist(p1, p2)
+
+    def _simulate_flash_delta(self, action, hero_speed, map_info):
+        """Flash simulation that may cross a wall segment if landing cell is passable."""
+        d_idx = self._dir_from_action(action)
+        dx, dz = int(DIR_VEC[d_idx][0]), int(DIR_VEC[d_idx][1])
+        step_len = self._move_len(action, hero_speed)
+        center = self._to_map_center(map_info)
+
+        if center is None:
+            return dx * step_len, dz * step_len, step_len, False
+
+        moved = 0
+        seen_block = False
+        wall_crossed = False
+        for i in range(1, step_len + 1):
+            r = center + dz * i
+            c = center + dx * i
+            if self._cell_passable(map_info, r, c):
+                moved = i
+                if seen_block:
+                    wall_crossed = True
+            else:
+                seen_block = True
+
+        return dx * moved, dz * moved, moved, wall_crossed
 
     def _dir_from_action(self, action):
         return int(action % 8)
@@ -188,7 +350,11 @@ class Preprocessor:
             if int(legal_action[a]) == 0:
                 continue
 
-            ddx, ddz, moved = self._simulate_delta(a, hero_speed, map_info)
+            wall_crossed = False
+            if a >= 8 and flash_cd_norm <= 1e-4:
+                ddx, ddz, moved, wall_crossed = self._simulate_flash_delta(a, hero_speed, map_info)
+            else:
+                ddx, ddz, moved = self._simulate_delta(a, hero_speed, map_info)
             new_pos = (hero_pos[0] + ddx, hero_pos[1] + ddz)
             a_dir = self._dir_from_action(a)
             avec = DIR_VEC[a_dir].astype(np.float32)
@@ -223,8 +389,12 @@ class Preprocessor:
             target_pos = None
             target_weight = 0.0
             if nearest_buff_pos is not None and buff_remain_norm < 0.05:
-                d_buff = self._dist(hero_pos, nearest_buff_pos)
-                d_treasure = self._dist(hero_pos, nearest_treasure_pos) if nearest_treasure_pos is not None else 999.0
+                d_buff = self._path_dist_or_euclid(hero_pos, nearest_buff_pos)
+                d_treasure = (
+                    self._path_dist_or_euclid(hero_pos, nearest_treasure_pos)
+                    if nearest_treasure_pos is not None
+                    else 999.0
+                )
                 if nearest_before > 8.0 or d_buff <= d_treasure * 0.8:
                     target_pos = nearest_buff_pos
                     target_weight = 1.6
@@ -234,8 +404,8 @@ class Preprocessor:
                 target_weight = 1.2
 
             if target_pos is not None:
-                before = self._dist(hero_pos, target_pos)
-                after = self._dist(new_pos, target_pos)
+                before = self._path_dist_or_euclid(hero_pos, target_pos)
+                after = self._path_dist_or_euclid(new_pos, target_pos)
                 score += target_weight * (before - after)
                 if after <= 1.2:
                     score += 0.8
@@ -252,6 +422,10 @@ class Preprocessor:
                     score -= 2.0
                 else:
                     safety_gain = nearest_after - nearest_before
+                    danger_now = danger + (2.0 if nearest_before <= 6.0 else 0.0)
+                    if wall_crossed and safety_gain > 1.0 and danger_now >= 1.8:
+                        # High bonus when dangerous and flash crosses wall while increasing safety.
+                        score += 3.2 + 0.6 * safety_gain
                     if safety_gain > 2.0:
                         score += 2.0 + 0.3 * safety_gain
                     if nearest_before > 12.0 and target_pos is not None:
@@ -283,6 +457,10 @@ class Preprocessor:
         hero = frame_state["heroes"]
         hero_pos = hero["pos"]
         hero_xy = (float(hero_pos.get("x", 0)), float(hero_pos.get("z", 0)))
+
+        # Real-time global map update from local observation window.
+        self._update_global_map(hero_xy, map_info)
+
         hero_speed = int(max(1, hero.get("speed", 1)))
         flash_cd = float(hero.get("flash_cooldown", env_info.get("flash_cooldown", 0)))
         buff_remain = float(hero.get("buff_remaining_time", 0))
