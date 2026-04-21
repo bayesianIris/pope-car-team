@@ -22,6 +22,7 @@ import time
 
 import torch
 from agent_ppo.conf.conf import Config
+from agent_ppo.greedy.policy_fusion import fuse_logits_torch
 
 
 class Algorithm:
@@ -59,7 +60,8 @@ class Algorithm:
         self.model.set_train_mode()
         self.optimizer.zero_grad()
 
-        logits, value_pred = self.model(obs)
+        net_logits, value_pred = self.model(obs)
+        logits = fuse_logits_torch(net_logits, obs)
 
         total_loss, info_list = self._compute_loss(
             logits=logits,

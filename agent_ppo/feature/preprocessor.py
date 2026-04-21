@@ -13,44 +13,27 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 import numpy as np
 from agent_ppo.conf.conf import Config
 
-# Map size / 地图尺寸（128×128）
 MAP_SIZE = 128.0
-# Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 5.0
-# Max distance bucket / 距离桶最大值
-MAX_DIST_BUCKET = 5.0
-# Max relative direction enum / 最大相对方向枚举值
-MAX_REL_DIR = 8.0
-# Max flash cooldown / 最大闪现冷却步数
 MAX_FLASH_CD = 2000.0
-# Max buff duration / buff最大持续时间
 MAX_BUFF_DURATION = 50.0
-# Action dimension / 动作维度
 ACTION_DIM = 16
-# Local map window size (player centered) / 局部地图窗口边长（玩家居中）
-LOCAL_MAP_WIN_SIZE = 9
-# Treasure slot config / 宝箱槽位配置
-TREASURE_SLOT_NUM = 3
-TREASURE_FEAT_DIM = 5
-# Keep only nearest one buff with 5D feature / buff仅保留最近1个，5维特征（含status）
-BUFF_SLOT_NUM = 1
-BUFF_FEAT_DIM = 5
-# Reward for each newly collected treasure / 每新增一个宝箱的奖励
-TREASURE_INC_REWARD = 0.66
-# Reward for each newly collected buff / 每新增一个buff的奖励
-BUFF_INC_REWARD = 0.4
-# Flash-escape bonus with conservative PPO scale / 小尺度闪现逃脱奖励
-FLASH_ESCAPE_REWARD = 0.03
-# Direction preference reward with conservative PPO scale / 小尺度远离怪物方向奖励
-DIRECTION_REWARD = 0.01
-# Potential decay factor for organ shaping / 物件势能衰减系数（非线性，距离越远影响越小）
-ORGAN_POTENTIAL_DECAY = np.log(2.0)
-# Calibrate treasure shaping: when distance changes by 1 near target, reward ~= 0.1
-ORGAN_TREASURE_ONE_STEP_REWARD = 0.1
-ORGAN_POTENTIAL_SCALE = ORGAN_TREASURE_ONE_STEP_REWARD / (
-    Config.GAMMA - np.exp(-ORGAN_POTENTIAL_DECAY)
-) # DEBUG: AI写的，为啥乘以这个我不太明白，但是actually数值上影响不大，或许是为了凑0.1的整数
-BUFF_SHAPING_MULT = BUFF_INC_REWARD / TREASURE_INC_REWARD
+MAX_VIEW_DIST = MAP_SIZE * 1.42
+
+# 8方向: E, NE, N, NW, W, SW, S, SE
+DIR_VEC = np.array(
+    [
+        [1, 0],
+        [1, -1],
+        [0, -1],
+        [-1, -1],
+        [-1, 0],
+        [-1, 1],
+        [0, 1],
+        [1, 1],
+    ],
+    dtype=np.int32,
+)
 
 
 def _norm(v, v_max, v_min=0.0):
@@ -68,16 +51,223 @@ class Preprocessor:
 
     def reset(self):
         self.step_no = 0
-        self.max_step = 200
-        self.last_min_monster_dist_norm = 0.5
+        self.max_step = 1000
+        self.last_min_monster_dist = 12.0
         self.last_treasures_collected = 0
         self.last_collected_buff = 0
-        self.last_organ_potential = None
+        self.last_target_dist = None
+
+    def _dir_from_action(self, action):
+        return int(action % 8)
+
+    def _move_len(self, action, hero_speed):
+        if action >= 8:
+            return 10 if (action % 8) in (0, 2, 4, 6) else 8
+        return int(max(1, hero_speed))
+
+    def _to_map_center(self, map_info):
+        if map_info is None or len(map_info) == 0:
+            return None
+        return len(map_info) // 2
+
+    def _cell_passable(self, map_info, r, c):
+        if map_info is None or len(map_info) == 0:
+            return True
+        if r < 0 or c < 0 or r >= len(map_info) or c >= len(map_info[0]):
+            return False
+        return bool(map_info[r][c] != 0)
+
+    def _simulate_delta(self, action, hero_speed, map_info):
+        """Simulate movement/flash with local obstacle clipping."""
+        d_idx = self._dir_from_action(action)
+        dx, dz = int(DIR_VEC[d_idx][0]), int(DIR_VEC[d_idx][1])
+        step_len = self._move_len(action, hero_speed)
+        center = self._to_map_center(map_info)
+
+        if center is None:
+            return dx * step_len, dz * step_len, step_len
+
+        moved = 0
+        for i in range(1, step_len + 1):
+            r = center + dz * i
+            c = center + dx * i
+            if not self._cell_passable(map_info, r, c):
+                break
+            moved = i
+
+        return dx * moved, dz * moved, moved
+
+    def _dir_local_space(self, map_info):
+        """Compute openness / immediate blocked flags for 8 directions."""
+        open_scores = np.zeros(8, dtype=np.float32)
+        blocked = np.zeros(8, dtype=np.float32)
+        center = self._to_map_center(map_info)
+
+        if center is None:
+            open_scores.fill(1.0)
+            return open_scores, blocked
+
+        max_probe = 4
+        for i in range(8):
+            dx, dz = int(DIR_VEC[i][0]), int(DIR_VEC[i][1])
+            free_cnt = 0
+            for step in range(1, max_probe + 1):
+                r = center + dz * step
+                c = center + dx * step
+                if not self._cell_passable(map_info, r, c):
+                    break
+                free_cnt += 1
+            open_scores[i] = free_cnt / float(max_probe)
+
+            r1 = center + dz
+            c1 = center + dx
+            blocked[i] = 0.0 if self._cell_passable(map_info, r1, c1) else 1.0
+
+        return open_scores, blocked
+
+    def _dist(self, p1, p2):
+        return float(np.hypot(p1[0] - p2[0], p1[1] - p2[1]))
+
+    def _rel_dir_norm(self, rel_dir):
+        rd = float(rel_dir)
+        rd = np.clip(rd, 0.0, 8.0)
+        return rd / 8.0
+
+    def _nearest_organ(self, organs, sub_type, hero_pos):
+        candidates = [o for o in organs if int(o.get("sub_type", 0)) == sub_type and int(o.get("status", 0)) == 1]
+        if not candidates:
+            return None, None
+        best = min(
+            candidates,
+            key=lambda o: self._dist(hero_pos, (float(o.get("pos", {}).get("x", 0)), float(o.get("pos", {}).get("z", 0)))),
+        )
+        p = best.get("pos", {})
+        bpos = (float(p.get("x", 0)), float(p.get("z", 0)))
+        return best, bpos
+
+    def _visible_monsters(self, monsters):
+        out = []
+        for m in monsters[:2]:
+            if float(m.get("is_in_view", 0)) <= 0:
+                continue
+            p = m.get("pos", {})
+            out.append(
+                {
+                    "pos": (float(p.get("x", 0)), float(p.get("z", 0))),
+                    "speed": float(m.get("speed", 1)),
+                    "dist_bucket": float(m.get("hero_l2_distance", 5)),
+                    "rel_dir": float(m.get("hero_relative_direction", 0)),
+                }
+            )
+        return out
+
+    def _nearest_monster_dist(self, hero_pos, visible_monsters):
+        if not visible_monsters:
+            return 30.0
+        return min(self._dist(hero_pos, m["pos"]) for m in visible_monsters)
+
+    def _greedy_scores(
+        self,
+        hero_pos,
+        hero_speed,
+        flash_cd_norm,
+        buff_remain_norm,
+        map_info,
+        legal_action,
+        visible_monsters,
+        nearest_treasure_pos,
+        nearest_buff_pos,
+        dir_open,
+        dir_blocked,
+        last_action,
+    ):
+        scores = np.full(ACTION_DIM, -1e6, dtype=np.float32)
+        nearest_before = self._nearest_monster_dist(hero_pos, visible_monsters)
+
+        for a in range(ACTION_DIM):
+            if int(legal_action[a]) == 0:
+                continue
+
+            ddx, ddz, moved = self._simulate_delta(a, hero_speed, map_info)
+            new_pos = (hero_pos[0] + ddx, hero_pos[1] + ddz)
+            a_dir = self._dir_from_action(a)
+            avec = DIR_VEC[a_dir].astype(np.float32)
+            anorm = np.linalg.norm(avec)
+            if anorm > 1e-6:
+                avec = avec / anorm
+
+            danger = 0.0
+            collision_penalty = 0.0
+            away_vec = np.zeros(2, dtype=np.float32)
+            nearest_after = 30.0
+            for m in visible_monsters:
+                d_after = self._dist(new_pos, m["pos"])
+                nearest_after = min(nearest_after, d_after)
+
+                threat = (1.2 + 0.3 * np.clip(m["speed"], 0.0, MAX_MONSTER_SPEED))
+                danger += threat * np.exp(-d_after / 6.0)
+                if d_after <= 1.5:
+                    collision_penalty += 40.0
+
+                vec = np.array([hero_pos[0] - m["pos"][0], hero_pos[1] - m["pos"][1]], dtype=np.float32)
+                vnorm = np.linalg.norm(vec) + 1e-6
+                away_vec += (vec / vnorm) * (1.0 / (vnorm + 1.0))
+
+            score = -3.5 * danger - collision_penalty
+
+            away_norm = np.linalg.norm(away_vec)
+            if away_norm > 1e-6:
+                away_unit = away_vec / away_norm
+                score += 1.4 * float(np.dot(away_unit, avec))
+
+            target_pos = None
+            target_weight = 0.0
+            if nearest_buff_pos is not None and buff_remain_norm < 0.05:
+                d_buff = self._dist(hero_pos, nearest_buff_pos)
+                d_treasure = self._dist(hero_pos, nearest_treasure_pos) if nearest_treasure_pos is not None else 999.0
+                if nearest_before > 8.0 or d_buff <= d_treasure * 0.8:
+                    target_pos = nearest_buff_pos
+                    target_weight = 1.6
+
+            if target_pos is None and nearest_treasure_pos is not None:
+                target_pos = nearest_treasure_pos
+                target_weight = 1.2
+
+            if target_pos is not None:
+                before = self._dist(hero_pos, target_pos)
+                after = self._dist(new_pos, target_pos)
+                score += target_weight * (before - after)
+                if after <= 1.2:
+                    score += 0.8
+
+            score += 0.35 * float(dir_open[a_dir])
+            score -= 0.8 * float(dir_blocked[a_dir])
+
+            if last_action is not None and int(last_action) >= 0 and self._dir_from_action(int(last_action)) == a_dir:
+                score += 0.08
+
+            if a >= 8:
+                score -= 0.6
+                if flash_cd_norm > 1e-4:
+                    score -= 2.0
+                else:
+                    safety_gain = nearest_after - nearest_before
+                    if safety_gain > 2.0:
+                        score += 2.0 + 0.3 * safety_gain
+                    if nearest_before > 12.0 and target_pos is not None:
+                        score -= 0.4
+            else:
+                if moved <= 0:
+                    score -= 1.2
+
+            scores[a] = score
+
+        return scores
 
     def feature_process(self, env_obs, last_action):
-        """Process env_obs into feature vector, legal_action mask, and reward.
+        """Return compact features + legal mask + reward.
 
-        将 env_obs 转换为特征向量、合法动作掩码和即时奖励。
+        观测中携带贪心动作评分，供策略端直接融合输出。
         """
         observation = env_obs["observation"]
         frame_state = observation["frame_state"]
@@ -86,142 +276,59 @@ class Preprocessor:
         legal_act_raw = observation["legal_action"]
 
         self.step_no = observation["step_no"]
-        self.max_step = env_info.get("max_step", 200)
+        self.max_step = env_info.get("max_step", 1000)
         cur_treasures_collected = int(env_info.get("treasures_collected", 0))
         cur_collected_buff = int(env_info.get("collected_buff", 0))
 
-        # Hero self features (4D) / 英雄自身特征
         hero = frame_state["heroes"]
         hero_pos = hero["pos"]
-        hero_x_norm = _norm(hero_pos["x"], MAP_SIZE)
-        hero_z_norm = _norm(hero_pos["z"], MAP_SIZE)
-        flash_cd_norm = _norm(hero["flash_cooldown"], MAX_FLASH_CD)
-        buff_remain_norm = _norm(hero["buff_remaining_time"], MAX_BUFF_DURATION)
+        hero_xy = (float(hero_pos.get("x", 0)), float(hero_pos.get("z", 0)))
+        hero_speed = int(max(1, hero.get("speed", 1)))
+        flash_cd = float(hero.get("flash_cooldown", env_info.get("flash_cooldown", 0)))
+        buff_remain = float(hero.get("buff_remaining_time", 0))
+        flash_cd_norm = _norm(flash_cd, MAX_FLASH_CD)
+        buff_remain_norm = _norm(buff_remain, MAX_BUFF_DURATION)
 
-        hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
-
-        # Monster features (5D x 2) / 怪物特征
         monsters = frame_state.get("monsters", [])
-        monster_feats = []
+        visible_monsters = self._visible_monsters(monsters)
+
+        monster_core = []
         for i in range(2):
             if i < len(monsters):
                 m = monsters[i]
-                is_in_view = float(m.get("is_in_view", 0))
-                m_pos = m["pos"]
-                if is_in_view:
-                    m_x_norm = _norm(m_pos["x"], MAP_SIZE)
-                    m_z_norm = _norm(m_pos["z"], MAP_SIZE)
-                    m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
-
-                    # Euclidean distance / 欧式距离
-                    raw_dist = np.sqrt((hero_pos["x"] - m_pos["x"]) ** 2 + (hero_pos["z"] - m_pos["z"]) ** 2)
-                    dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
-                else:
-                    m_x_norm = 0.0
-                    m_z_norm = 0.0
-                    m_speed_norm = 0.0
-                    dist_norm = 1.0
-                monster_feats.append(
-                    np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm], dtype=np.float32)
-                )
+                in_view = float(m.get("is_in_view", 0))
+                dist_bucket = float(m.get("hero_l2_distance", 5))
+                dist_approx = min(MAX_VIEW_DIST, dist_bucket * 30.0 + 15.0)
+                rel_dir_norm = self._rel_dir_norm(m.get("hero_relative_direction", 0))
+                speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
+                monster_core.extend([in_view, _norm(dist_approx, MAX_VIEW_DIST), rel_dir_norm, speed_norm])
             else:
-                monster_feats.append(np.zeros(5, dtype=np.float32))
+                monster_core.extend([0.0, 1.0, 0.0, 0.0])
 
-        # Treasure/Buff features / 宝箱与buff特征
         organs = frame_state.get("organs", [])
-        treasures = [o for o in organs if int(o.get("sub_type", 0)) == 1 and int(o.get("status", 0)) == 1]
-        treasures = sorted(
-            treasures,
-            key=lambda item: np.sqrt(
-                (hero_pos["x"] - float(item.get("pos", {}).get("x", 0))) ** 2
-                + (hero_pos["z"] - float(item.get("pos", {}).get("z", 0))) ** 2
-            ),
-        )
+        treasure_obj, nearest_treasure_pos = self._nearest_organ(organs, 1, hero_xy)
+        buff_obj, nearest_buff_pos = self._nearest_organ(organs, 2, hero_xy)
 
-        treasure_feat = np.zeros(Config.FEATURES[3], dtype=np.float32)
-        for idx, t in enumerate(treasures[:TREASURE_SLOT_NUM]):
-            t_pos = t.get("pos", {})
-            tx = float(t_pos.get("x", 0))
-            tz = float(t_pos.get("z", 0))
-            raw_dist = np.sqrt((hero_pos["x"] - tx) ** 2 + (hero_pos["z"] - tz) ** 2)
-            base = idx * TREASURE_FEAT_DIM
-            treasure_feat[base : base + TREASURE_FEAT_DIM] = np.array(
-                [
-                    1.0,
-                    _norm(tx, MAP_SIZE),
-                    _norm(tz, MAP_SIZE),
-                    _norm(raw_dist, MAP_SIZE * 1.41),
-                    _norm(t.get("hero_relative_direction", 0), MAX_REL_DIR),
-                ],
-                dtype=np.float32,
-            )
-
-        buffs = [o for o in organs if int(o.get("sub_type", 0)) == 2 and int(o.get("status", 0)) == 1]
-        buffs = sorted(
-            buffs,
-            key=lambda item: np.sqrt(
-                (hero_pos["x"] - float(item.get("pos", {}).get("x", 0))) ** 2
-                + (hero_pos["z"] - float(item.get("pos", {}).get("z", 0))) ** 2
-            ),
-        )
-
-        buff_feat = np.zeros(Config.FEATURES[4], dtype=np.float32)
-        for idx, b in enumerate(buffs[:BUFF_SLOT_NUM]):
-            b_pos = b.get("pos", {})
-            bx = float(b_pos.get("x", 0))
-            bz = float(b_pos.get("z", 0))
-            raw_dist = np.sqrt((hero_pos["x"] - bx) ** 2 + (hero_pos["z"] - bz) ** 2)
-            base = idx * BUFF_FEAT_DIM
-            buff_feat[base : base + BUFF_FEAT_DIM] = np.array(
-                [
-                    1.0,
-                    _norm(bx, MAP_SIZE),
-                    _norm(bz, MAP_SIZE),
-                    _norm(raw_dist, MAP_SIZE * 1.41),
-                    _norm(b.get("hero_relative_direction", 0), MAX_REL_DIR),
-                ],
-                dtype=np.float32,
-            )
-
-        # Organ potential-based shaping / 物件势能差分奖励
-        # F(s,a,s') = gamma * Phi(s') - Phi(s)
-        # Phi(s) = sum_i [w_i * A * exp(-k * d_i)]
-        # Treasure: w=1; Buff: w=TREASURE_INC_REWARD/BUFF_INC_REWARD
-        organ_potential = 0.0
-        # Monotonic collected-count baseline keeps potential continuous at pickup,
-        # while staying in PBRS form and reducing pickup-time penalty artifacts.
-        organ_potential += ORGAN_POTENTIAL_SCALE * (
-            cur_treasures_collected + BUFF_SHAPING_MULT * cur_collected_buff
-        )
-        for organ in organs:
-            if int(organ.get("status", 0)) != 1:
-                continue
-            o_pos = organ.get("pos", {})
-            ox = float(o_pos.get("x", 0))
-            oz = float(o_pos.get("z", 0))
-            raw_dist = np.sqrt((hero_pos["x"] - ox) ** 2 + (hero_pos["z"] - oz) ** 2)
-            subtype = int(organ.get("sub_type", 0))
-            type_weight = BUFF_SHAPING_MULT if subtype == 2 else 1.0
-            organ_potential += type_weight * ORGAN_POTENTIAL_SCALE * np.exp(-ORGAN_POTENTIAL_DECAY * raw_dist)
-
-        if self.last_organ_potential is None:
-            organ_shaping = 0.0
+        if treasure_obj is None:
+            treasure_core = [1.0, 0.0, 0.0]
         else:
-            organ_shaping = Config.GAMMA * organ_potential - self.last_organ_potential
+            tdist = self._dist(hero_xy, nearest_treasure_pos)
+            treasure_core = [
+                _norm(tdist, MAX_VIEW_DIST),
+                self._rel_dir_norm(treasure_obj.get("hero_relative_direction", 0)),
+                1.0,
+            ]
 
-        # Local map features (9x9=81D) / 局部地图特征
-        map_feat = np.zeros(LOCAL_MAP_WIN_SIZE * LOCAL_MAP_WIN_SIZE, dtype=np.float32)
-        if map_info is not None and len(map_info) > 0:
-            center = len(map_info) // 2
-            radius = LOCAL_MAP_WIN_SIZE // 2
-            flat_idx = 0
-            for row in range(center - radius, center + radius + 1):
-                for col in range(center - radius, center + radius + 1):
-                    if 0 <= row < len(map_info) and 0 <= col < len(map_info[0]):
-                        map_feat[flat_idx] = float(map_info[row][col] != 0)
-                    flat_idx += 1
+        if buff_obj is None:
+            buff_core = [1.0, 0.0, 0.0]
+        else:
+            bdist = self._dist(hero_xy, nearest_buff_pos)
+            buff_core = [
+                _norm(bdist, MAX_VIEW_DIST),
+                self._rel_dir_norm(buff_obj.get("hero_relative_direction", 0)),
+                1.0,
+            ]
 
-        # Legal action mask (16D) / 合法动作掩码
         legal_action = [1] * ACTION_DIM
         if isinstance(legal_act_raw, list) and legal_act_raw:
             if isinstance(legal_act_raw[0], bool):
@@ -234,56 +341,66 @@ class Preprocessor:
         if sum(legal_action) == 0:
             legal_action = [1] * ACTION_DIM
 
-        # Progress features (2D) / 进度特征
         step_norm = _norm(self.step_no, self.max_step)
-        survival_ratio = step_norm
-        progress_feat = np.array([step_norm, survival_ratio], dtype=np.float32)
+        core = np.array(
+            [flash_cd_norm, buff_remain_norm, step_norm] + monster_core + treasure_core + buff_core,
+            dtype=np.float32,
+        )
 
-        # Concatenate features / 拼接特征
+        dir_open, dir_blocked = self._dir_local_space(map_info)
+        greedy_scores = self._greedy_scores(
+            hero_pos=hero_xy,
+            hero_speed=hero_speed,
+            flash_cd_norm=flash_cd_norm,
+            buff_remain_norm=buff_remain_norm,
+            map_info=map_info,
+            legal_action=legal_action,
+            visible_monsters=visible_monsters,
+            nearest_treasure_pos=nearest_treasure_pos,
+            nearest_buff_pos=nearest_buff_pos,
+            dir_open=dir_open,
+            dir_blocked=dir_blocked,
+            last_action=last_action,
+        )
+
         feature = np.concatenate(
             [
-                hero_feat,
-                monster_feats[0],
-                monster_feats[1],
-                treasure_feat,
-                buff_feat,
-                map_feat,
-                np.array(legal_action, dtype=np.float32),
-                progress_feat,
+                core,
+                dir_open,
+                dir_blocked,
+                greedy_scores,
             ]
         )
 
-        # Step reward / 即时奖励
-        cur_min_dist_norm = 1.0
-        for m_feat in monster_feats:
-            if m_feat[0] > 0:
-                cur_min_dist_norm = min(cur_min_dist_norm, m_feat[4])
-
+        nearest_monster_dist = self._nearest_monster_dist(hero_xy, visible_monsters)
         survive_reward = 0.01
-        dist_change = cur_min_dist_norm - self.last_min_monster_dist_norm
-        dist_shaping = 0.1 * dist_change
+        dist_change = nearest_monster_dist - self.last_min_monster_dist
+        dist_shaping = 0.04 * np.clip(dist_change, -5.0, 5.0)
+
+        target_dist = None
+        if buff_remain_norm < 0.05 and nearest_buff_pos is not None:
+            target_dist = self._dist(hero_xy, nearest_buff_pos)
+        elif nearest_treasure_pos is not None:
+            target_dist = self._dist(hero_xy, nearest_treasure_pos)
+
+        target_shaping = 0.0
+        if target_dist is not None and self.last_target_dist is not None:
+            target_shaping = 0.02 * np.clip(self.last_target_dist - target_dist, -4.0, 4.0)
+
         treasure_inc = max(0, cur_treasures_collected - self.last_treasures_collected)
         buff_inc = max(0, cur_collected_buff - self.last_collected_buff)
-        collection_reward = TREASURE_INC_REWARD * treasure_inc + BUFF_INC_REWARD * buff_inc
+        collection_reward = 0.8 * treasure_inc + 0.45 * buff_inc
         flash_escape_reward = (
-            FLASH_ESCAPE_REWARD
-            if (last_action is not None and int(last_action) >= 8 and dist_change > 0.05)
+            0.03
+            if (last_action is not None and int(last_action) >= 8 and dist_change > 1.2)
             else 0.0
         )
-        # direction_reward = DIRECTION_REWARD if dist_change > 0 else 0.0
 
-        self.last_min_monster_dist_norm = cur_min_dist_norm
+        self.last_min_monster_dist = nearest_monster_dist
         self.last_treasures_collected = cur_treasures_collected
         self.last_collected_buff = cur_collected_buff
-        self.last_organ_potential = organ_potential
+        self.last_target_dist = target_dist
 
-        reward = [
-            survive_reward
-            + dist_shaping
-            + collection_reward
-            + organ_shaping
-            + flash_escape_reward
-            # + direction_reward
-        ]
+        reward = [survive_reward + dist_shaping + target_shaping + collection_reward + flash_escape_reward]
 
         return feature, legal_action, reward

@@ -22,6 +22,7 @@ from agent_ppo.algorithm.algorithm import Algorithm
 from agent_ppo.conf.conf import Config
 from agent_ppo.feature.definition import ActData, ObsData
 from agent_ppo.feature.preprocessor import Preprocessor
+from agent_ppo.greedy.policy_fusion import fuse_logits_np
 from agent_ppo.model.model import Model
 
 
@@ -131,18 +132,21 @@ class Agent(BaseAgent):
         return int(action[0])
 
     def _run_model(self, feature, legal_action):
-        """Run model inference, return logits, value, prob.
+        """Run model inference, return fused logits, value, prob.
 
-        执行模型推理，返回 logits、value 和动作概率。
+        执行模型推理，返回融合 logits、value 和动作概率。
         """
         self.model.set_eval_mode()
         obs_tensor = torch.tensor(np.array([feature]), dtype=torch.float32).to(self.device)
 
         with torch.no_grad():
-            logits, value = self.model(obs_tensor, inference=True)
+            net_logits, value = self.model(obs_tensor, inference=True)
 
-        logits_np = logits.cpu().numpy()[0]
+        net_logits_np = net_logits.cpu().numpy()[0]
         value_np = value.cpu().numpy()[0]
+
+        # Greedy dominates, tiny net only perturbs by 0.01%.
+        logits_np = fuse_logits_np(net_logits_np, feature)
 
         # Legal action masked softmax / 合法动作掩码 softmax
         legal_action_np = np.array(legal_action, dtype=np.float32)

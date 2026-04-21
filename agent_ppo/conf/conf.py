@@ -13,23 +13,25 @@ Configuration for Gorge Chase PPO.
 
 class Config:
 
-    # Feature dimensions / 特征维度（共133维）
-    FEATURES = [
-        4,
-        5,
-        5,
-        15,
-        5,
-        81,
-        16,
-        2,
-    ]
+    # Action space / 动作空间：16维
+    ACTION_NUM = 16
+
+    # Compact feature dimensions / 轻量特征维度（共49维）
+    # [core(17), dir_open(8), dir_blocked(8), greedy_action_scores(16)]
+    FEATURES = [17, 8, 8, 16]
     FEATURE_SPLIT_SHAPE = FEATURES
     FEATURE_LEN = sum(FEATURE_SPLIT_SHAPE)
     DIM_OF_OBSERVATION = FEATURE_LEN
 
-    # Action space / 动作空间：16维
-    ACTION_NUM = 16
+    # Prefix used by the tiny one-layer network / 极简一层网络输入前缀
+    NET_INPUT_DIM = 17
+
+    # Greedy score slice in feature / 特征中贪心评分切片
+    GREEDY_SCORE_START = FEATURE_LEN - ACTION_NUM
+    GREEDY_SCORE_END = FEATURE_LEN
+
+    # Fusion ratio: net only contributes 0.01% / 融合比率：网络仅贡献0.01%
+    NET_LOGIT_RATIO = 1e-4
 
     # Value head / 价值头：单头生存奖励
     VALUE_NUM = 1
