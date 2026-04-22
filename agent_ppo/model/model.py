@@ -62,13 +62,15 @@ class Model(nn.Module):
         self.map_encoder = nn.Sequential(
             nn.Conv2d(self.map_channels, 16, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),  # 21 -> 10
+            nn.MaxPool2d(kernel_size=2, stride=2),
             nn.Conv2d(16, 32, kernel_size=3, stride=1, padding=1),
             nn.ReLU(),
-            nn.MaxPool2d(kernel_size=2, stride=2),  # 10 -> 5
+            nn.MaxPool2d(kernel_size=2, stride=2),
         )
 
-        map_out_dim = 32 * 5 * 5
+        with torch.no_grad():
+            dummy_map = torch.zeros(1, self.map_channels, self.map_h, self.map_w)
+            map_out_dim = int(self.map_encoder(dummy_map).flatten(start_dim=1).shape[1])
         self.map_proj = nn.Sequential(
             make_fc_layer(map_out_dim, vec_hidden_dim),
             nn.ReLU(),
@@ -87,11 +89,11 @@ class Model(nn.Module):
         self.critic_head = make_fc_layer(fused_dim, value_num)
 
     def _split_obs(self, obs):
-        """Split flattened observation into vector part and 21x21 map part.
+        """Split flattened observation into vector part and local map part.
 
-        将展平观测拆分为向量部分和 21x21 地图部分。
+        将展平观测拆分为向量部分和局部地图部分。
         """
-        # Feature layout: [4,6,6,4,4,4*21*21,16,2], map is the 6th segment.
+        # Feature layout: [4,6,6,4,4,4*HxW,16,2], map is the 6th segment.
         map_start = sum(Config.FEATURES[:5])
         map_end = map_start + self.map_dim
 

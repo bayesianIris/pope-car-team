@@ -17,8 +17,8 @@ from agent_ppo.conf.conf import Config
 MAP_SIZE = 128.0
 # World map side length / 全局地图边长
 WORLD_MAP_SIZE = 128
-# Local view map side length / 局部视野边长
-LOCAL_VIEW_SIZE = 21
+# Local map side length for CNN input (hero-centered) / CNN输入局部地图边长（以角色为中心）
+CNN_LOCAL_VIEW_SIZE = 9
 # Max monster speed / 最大怪物速度
 MAX_MONSTER_SPEED = 5.0
 # Max relative direction enum / 最大相对方向枚举
@@ -146,7 +146,7 @@ class Preprocessor:
         # Nearest buff feature (4D): x, z, dist, direction
         nearest_buff_feat = self._nearest_organ_feature(buffs, hero_x, hero_z)
 
-        # Local map channels: terrain + treasure + buff + monster / 4x21x21
+        # Local map channels (hero-centered): terrain + treasure + buff + monster / 4x9x9
         terrain_map = self._extract_terrain_local_map(map_info)
         treasure_map = self._build_entity_local_map(treasures, hero_x, hero_z)
         buff_map = self._build_entity_local_map(buffs, hero_x, hero_z)
@@ -289,7 +289,7 @@ class Preprocessor:
         return feat
 
     def _extract_terrain_local_map(self, map_info):
-        terrain = np.zeros((LOCAL_VIEW_SIZE, LOCAL_VIEW_SIZE), dtype=np.float32)
+        terrain = np.zeros((CNN_LOCAL_VIEW_SIZE, CNN_LOCAL_VIEW_SIZE), dtype=np.float32)
         if not isinstance(map_info, list) or not map_info or not isinstance(map_info[0], list):
             return terrain
 
@@ -298,13 +298,13 @@ class Preprocessor:
         if src_w <= 0:
             return terrain
 
-        row_start = max((src_h - LOCAL_VIEW_SIZE) // 2, 0)
-        col_start = max((src_w - LOCAL_VIEW_SIZE) // 2, 0)
-        for r in range(LOCAL_VIEW_SIZE):
+        row_start = max((src_h - CNN_LOCAL_VIEW_SIZE) // 2, 0)
+        col_start = max((src_w - CNN_LOCAL_VIEW_SIZE) // 2, 0)
+        for r in range(CNN_LOCAL_VIEW_SIZE):
             src_r = row_start + r
             if src_r < 0 or src_r >= src_h:
                 continue
-            for c in range(LOCAL_VIEW_SIZE):
+            for c in range(CNN_LOCAL_VIEW_SIZE):
                 src_c = col_start + c
                 if src_c < 0 or src_c >= src_w:
                     continue
@@ -312,8 +312,8 @@ class Preprocessor:
         return terrain
 
     def _build_entity_local_map(self, entities, hero_x, hero_z, require_in_view=False):
-        entity_map = np.zeros((LOCAL_VIEW_SIZE, LOCAL_VIEW_SIZE), dtype=np.float32)
-        center = LOCAL_VIEW_SIZE // 2
+        entity_map = np.zeros((CNN_LOCAL_VIEW_SIZE, CNN_LOCAL_VIEW_SIZE), dtype=np.float32)
+        center = CNN_LOCAL_VIEW_SIZE // 2
         for item in entities:
             if require_in_view and float(item.get("is_in_view", 1)) <= 0:
                 continue
@@ -322,7 +322,7 @@ class Preprocessor:
             oz = int(pos.get("z", 0))
             row = center + (oz - hero_z)
             col = center + (ox - hero_x)
-            if 0 <= row < LOCAL_VIEW_SIZE and 0 <= col < LOCAL_VIEW_SIZE:
+            if 0 <= row < CNN_LOCAL_VIEW_SIZE and 0 <= col < CNN_LOCAL_VIEW_SIZE:
                 entity_map[row, col] = 1.0
         return entity_map
 
@@ -335,7 +335,7 @@ class Preprocessor:
         if src_h <= 0 or src_w <= 0:
             return 0
 
-        view_size = min(src_h, src_w, LOCAL_VIEW_SIZE)
+        view_size = min(src_h, src_w)
         center = view_size // 2
         row_start = max((src_h - view_size) // 2, 0)
         col_start = max((src_w - view_size) // 2, 0)
