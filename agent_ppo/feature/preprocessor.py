@@ -10,6 +10,8 @@ Feature preprocessor and reward design for Gorge Chase PPO.
 峡谷追猎 PPO 特征预处理与奖励设计。
 """
 
+from collections import deque
+
 import numpy as np
 from agent_ppo.conf.conf import Config
 
@@ -38,6 +40,12 @@ BUFF_INC_REWARD = 0.4
 EXPLORE_REWARD_PER_CELL = 0.001
 # Flash-escape bonus / 闪现拉开距离奖励
 FLASH_ESCAPE_REWARD = 0.03
+# Penalty when action does not move hero position / 动作未发生位移时惩罚
+ACTION_FAIL_PENALTY = 0.02
+# Penalty when 10-step window Manhattan progress is too small / 10步窗口曼哈顿进展过小时惩罚
+WANDER_PENALTY = 0.02
+WANDER_WINDOW_SIZE = 10
+WANDER_MANHATTAN_THRESHOLD = 4
 
 # Potential-based shaping for organs (slower decay than reference)
 # 参考实现半衰期约1，这里调慢到半衰期约4
@@ -76,6 +84,8 @@ class Preprocessor:
         # -1: 未探索, 0: 障碍, 1: 可通行
         self.global_map = np.full((WORLD_MAP_SIZE, WORLD_MAP_SIZE), -1.0, dtype=np.float32)
         self.explored_cell_count = 0
+        self.last_hero_pos = None
+        self.position_window = deque(maxlen=WANDER_WINDOW_SIZE)
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -98,6 +108,7 @@ class Preprocessor:
         hero_pos = hero["pos"]
         hero_x = int(hero_pos["x"])
         hero_z = int(hero_pos["z"])
+        current_pos = (hero_x, hero_z)
         hero_x_norm = _norm(hero_x, MAP_SIZE)
         hero_z_norm = _norm(hero_z, MAP_SIZE)
         flash_cd_norm = _norm(hero.get("flash_cooldown", 0), MAX_FLASH_CD)
@@ -243,12 +254,31 @@ class Preprocessor:
             else 0.0
         )
 
+        action_fail_penalty = 0.0
+        if (
+            last_action is not None
+            and self.last_hero_pos is not None
+            and 0 <= int(last_action) < ACTION_DIM
+            and self.last_hero_pos[0] == hero_x
+            and self.last_hero_pos[1] == hero_z
+        ):
+            action_fail_penalty = ACTION_FAIL_PENALTY
+
+        self.position_window.append(current_pos)
+        wander_penalty = 0.0
+        if len(self.position_window) == WANDER_WINDOW_SIZE:
+            start_x, start_z = self.position_window[0]
+            manhattan_dist = abs(hero_x - start_x) + abs(hero_z - start_z)
+            if manhattan_dist < WANDER_MANHATTAN_THRESHOLD:
+                wander_penalty = WANDER_PENALTY
+
         survive_reward = 0.01
 
         self.last_treasures_collected = cur_treasures_collected
         self.last_collected_buff = cur_collected_buff
         self.last_organ_potential = organ_potential
         self.last_monster_potential = monster_potential
+        self.last_hero_pos = current_pos
 
         reward = [
             survive_reward
@@ -256,6 +286,8 @@ class Preprocessor:
             + organ_shaping
             + monster_shaping
             + exploration_reward
+            - action_fail_penalty
+            - wander_penalty
             # + flash_escape_reward
         ]
 
