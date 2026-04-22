@@ -45,8 +45,8 @@ class Model(nn.Module):
         self.map_dim = Config.FEATURES[5]
         self.vec_dim = Config.DIM_OF_OBSERVATION - self.map_dim
 
-        vec_hidden_dim = 128
-        fused_dim = 128
+        vec_hidden_dim = 256
+        fused_dim = 256
         action_num = Config.ACTION_NUM
         value_num = Config.VALUE_NUM
 
@@ -93,7 +93,7 @@ class Model(nn.Module):
 
         将展平观测拆分为向量部分和局部地图部分。
         """
-        # Feature layout: [4,6,6,4,4,4*HxW,16,2], map is the 6th segment.
+        # Feature layout: [4,6,6,4,4,4*HxW,16,2,3], map is the 6th segment.
         map_start = sum(Config.FEATURES[:5])
         map_end = map_start + self.map_dim
 

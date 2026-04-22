@@ -25,6 +25,12 @@ MAX_MONSTER_SPEED = 5.0
 MAX_REL_DIR = 8.0
 # Max flash cooldown / 最大闪现冷却步数
 MAX_FLASH_CD = 2000.0
+# Max monster interval / 第二怪物出现间隔上限
+MAX_MONSTER_INTERVAL = 2000.0
+# Max monster speedup step / 怪物加速步数上限
+MAX_MONSTER_SPEEDUP = 2000.0
+# Max buff refresh cooldown / buff刷新时间上限
+MAX_BUFF_REFRESH_TIME = 500.0
 # Max buff duration / buff最大持续时间
 MAX_BUFF_DURATION = 50.0
 # Action dimension / 动作维度
@@ -38,6 +44,8 @@ BUFF_INC_REWARD = 0.4
 EXPLORE_REWARD_PER_CELL = 0.001
 # Flash-escape bonus / 闪现拉开距离奖励
 FLASH_ESCAPE_REWARD = 0.03
+# Action failure penalty when position unchanged / 动作失败惩罚（位置未变化）
+ACTION_FAIL_PENALTY = -0.02
 
 # Potential-based shaping for organs (slower decay than reference)
 # 参考实现半衰期约1，这里调慢到半衰期约4
@@ -69,6 +77,7 @@ class Preprocessor:
     def reset(self):
         self.step_no = 0
         self.max_step = 200
+        self.last_hero_pos = None
         self.last_treasures_collected = 0
         self.last_collected_buff = 0
         self.last_organ_potential = None
@@ -93,6 +102,22 @@ class Preprocessor:
         cur_treasures_collected = int(env_info.get("treasures_collected", 0))
         cur_collected_buff = int(env_info.get("collected_buff", 0))
 
+        # Env config features (3D) / 环境配置特征（3维）
+        env_monster_interval_norm = _norm(env_info.get("monster_interval", 0), MAX_MONSTER_INTERVAL)
+        env_monster_speedup_norm = _norm(
+            env_info.get("monster_speed_boost_step", env_info.get("monster_speedup", 0)),
+            MAX_MONSTER_SPEEDUP,
+        )
+        env_buff_refresh_norm = _norm(env_info.get("buff_refresh_time", 0), MAX_BUFF_REFRESH_TIME)
+        env_feat = np.array(
+            [
+                env_monster_interval_norm,
+                env_monster_speedup_norm,
+                env_buff_refresh_norm,
+            ],
+            dtype=np.float32,
+        )
+
         # Hero self features (4D) / 英雄自身特征
         hero = frame_state["heroes"]
         hero_pos = hero["pos"]
@@ -102,6 +127,8 @@ class Preprocessor:
         hero_z_norm = _norm(hero_z, MAP_SIZE)
         flash_cd_norm = _norm(hero.get("flash_cooldown", 0), MAX_FLASH_CD)
         buff_remain_norm = _norm(hero.get("buff_remaining_time", 0), MAX_BUFF_DURATION)
+
+        action_failed = self.last_hero_pos is not None and self.last_hero_pos == (hero_x, hero_z)
 
         hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
 
@@ -193,6 +220,7 @@ class Preprocessor:
                 multi_map_feat,
                 np.array(legal_action, dtype=np.float32),
                 progress_feat,
+                env_feat,
             ]
         )
 
@@ -244,7 +272,9 @@ class Preprocessor:
         )
 
         survive_reward = 0.01
+        action_fail_penalty = ACTION_FAIL_PENALTY if action_failed else 0.0
 
+        self.last_hero_pos = (hero_x, hero_z)
         self.last_treasures_collected = cur_treasures_collected
         self.last_collected_buff = cur_collected_buff
         self.last_organ_potential = organ_potential
@@ -256,6 +286,7 @@ class Preprocessor:
             + organ_shaping
             + monster_shaping
             + exploration_reward
+            + action_fail_penalty
             # + flash_escape_reward
         ]
 
