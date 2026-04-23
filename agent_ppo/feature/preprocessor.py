@@ -38,8 +38,10 @@ TREASURE_INC_REWARD = 0.66
 BUFF_INC_REWARD = 0.4
 # Small exploration reward coefficient / 探索奖励系数（小）
 EXPLORE_REWARD_PER_CELL = 0.001
-# Flash-escape bonus / 闪现拉开距离奖励
-FLASH_ESCAPE_REWARD = 0.03
+# Flash use penalty / 闪现基础使用惩罚
+FLASH_USE_PENALTY = 0.03
+# Flash wall-pass compensation / 闪现穿墙补偿
+FLASH_WALL_COMPENSATION = FLASH_USE_PENALTY
 # Penalty when action does not move hero position / 动作未发生位移时惩罚
 ACTION_FAIL_PENALTY = 0.02
 # Penalty when 10-step window Manhattan progress is too small / 10步窗口曼哈顿进展过小时惩罚
@@ -243,16 +245,16 @@ class Preprocessor:
         collection_reward = TREASURE_INC_REWARD * treasure_inc + BUFF_INC_REWARD * buff_inc
 
         # Flash action index [8, 15]
-        flash_escape_reward = (
-            FLASH_ESCAPE_REWARD
-            if (
-                last_action is not None
-                and int(last_action) >= 8
-                and int(last_action) < ACTION_DIM
-                and monster_shaping > 0.0
-            )
-            else 0.0
-        )
+        flash_use_penalty = 0.0
+        flash_wall_compensation = 0.0
+        if (
+            last_action is not None
+            and int(last_action) >= 8
+            and int(last_action) < ACTION_DIM
+        ):
+            flash_use_penalty = FLASH_USE_PENALTY
+            if self._flash_passed_wall(terrain_map):
+                flash_wall_compensation = FLASH_WALL_COMPENSATION
 
         action_fail_penalty = 0.0
         if (
@@ -288,7 +290,8 @@ class Preprocessor:
             + exploration_reward
             - action_fail_penalty
             - wander_penalty
-            # + flash_escape_reward
+            - flash_use_penalty
+            + flash_wall_compensation
         ]
 
         return feature, legal_action, reward
@@ -389,3 +392,37 @@ class Preprocessor:
 
         self.explored_cell_count += newly_explored
         return newly_explored
+
+    def _flash_passed_wall(self, terrain_map):
+        if terrain_map.size == 0:
+            return False
+
+        center = LOCAL_VIEW_SIZE // 2
+        if terrain_map[center, center] > 0.5:
+            return True
+
+        visited = np.zeros((LOCAL_VIEW_SIZE, LOCAL_VIEW_SIZE), dtype=np.bool_)
+        queue = deque([(center, center)])
+        visited[center, center] = True
+
+        while queue:
+            row, col = queue.popleft()
+            if terrain_map[row, col] <= 0.5:
+                return False
+
+            for next_row, next_col in (
+                (row - 1, col),
+                (row + 1, col),
+                (row, col - 1),
+                (row, col + 1),
+            ):
+                if not (0 <= next_row < LOCAL_VIEW_SIZE and 0 <= next_col < LOCAL_VIEW_SIZE):
+                    continue
+                if visited[next_row, next_col]:
+                    continue
+                if terrain_map[next_row, next_col] > 0.5:
+                    continue
+                visited[next_row, next_col] = True
+                queue.append((next_row, next_col))
+
+        return True
