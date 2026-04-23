@@ -41,7 +41,7 @@ EXPLORE_REWARD_PER_CELL = 0.001
 # Flash use penalty / 闪现基础使用惩罚
 FLASH_USE_PENALTY = 0.03
 # Flash wall-pass compensation / 闪现穿墙补偿
-FLASH_WALL_COMPENSATION = FLASH_USE_PENALTY
+FLASH_WALL_COMPENSATION = FLASH_USE_PENALTY + 0.05
 # Penalty when action does not move hero position / 动作未发生位移时惩罚
 ACTION_FAIL_PENALTY = 0.02
 # Penalty when 10-step window Manhattan progress is too small / 10步窗口曼哈顿进展过小时惩罚
