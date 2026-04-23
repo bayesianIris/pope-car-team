@@ -87,13 +87,13 @@ class Agent(BaseAgent):
         ]
 
     def exploit(self, env_obs):
-        """Greedy inference for evaluation.
+        """Inference for evaluation.
 
-        评估时贪心选择动作（利用）。
+        评估时动作选择支持贪心或按概率采样。
         """
         obs_data, _ = self.observation_process(env_obs)
         act_data = self.predict([obs_data])
-        return self.action_process(act_data[0], is_stochastic=False)
+        return self.action_process(act_data[0], is_stochastic=not Config.EVAL_USE_ARGMAX)
 
     def learn(self, list_sample_data):
         """Train the model.

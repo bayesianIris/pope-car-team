@@ -41,11 +41,11 @@ EXPLORE_REWARD_PER_CELL = 0.001
 # Flash-escape bonus / 闪现拉开距离奖励
 FLASH_ESCAPE_REWARD = 0.03
 # Penalty when action does not move hero position / 动作未发生位移时惩罚
-ACTION_FAIL_PENALTY = 0.02
+ACTION_FAIL_PENALTY = 0.2
 # Penalty when 10-step window Manhattan progress is too small / 10步窗口曼哈顿进展过小时惩罚
-WANDER_PENALTY = 0.02
+WANDER_PENALTY = 0.1
 WANDER_WINDOW_SIZE = 10
-WANDER_MANHATTAN_THRESHOLD = 4
+WANDER_MANHATTAN_THRESHOLD = 7
 
 # Potential-based shaping for organs (slower decay than reference)
 # 参考实现半衰期约1，这里调慢到半衰期约4

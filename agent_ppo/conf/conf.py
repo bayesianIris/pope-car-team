@@ -36,6 +36,11 @@ class Config:
     # Value head / 价值头：单头生存奖励
     VALUE_NUM = 1
 
+    # Evaluation action mode / 评估动作模式
+    # True: use argmax greedy action, False: sample by probability
+    # True: 使用 argmax 贪心动作，False: 按概率采样动作
+    EVAL_USE_ARGMAX = False
+
     # PPO hyperparameters / PPO 超参数
     GAMMA = 0.99
     LAMDA = 0.95
