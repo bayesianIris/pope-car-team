@@ -88,6 +88,7 @@ class Preprocessor:
         self.explored_cell_count = 0
         self.last_hero_pos = None
         self.position_window = deque(maxlen=WANDER_WINDOW_SIZE)
+        self.buff_remain = 0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -122,6 +123,7 @@ class Preprocessor:
         monsters = frame_state.get("monsters", [])
         monster_feats = []
         visible_monster_min_dist = MAP_SIZE * 1.41
+        
         for i in range(2):
             if i < len(monsters):
                 m = monsters[i]
@@ -173,6 +175,8 @@ class Preprocessor:
             ]
         ).astype(np.float32)
 
+
+
         # Update global explored map and get exploration reward
         newly_explored = self._update_global_map(map_info, hero_x, hero_z)
         exploration_reward = EXPLORE_REWARD_PER_CELL * newly_explored
@@ -195,19 +199,14 @@ class Preprocessor:
         survival_ratio = step_norm
         progress_feat = np.array([step_norm, survival_ratio], dtype=np.float32)
 
-        # Concatenate features / 拼接特征
-        feature = np.concatenate(
-            [
-                hero_feat,
-                monster_feats[0],
-                monster_feats[1],
-                nearest_treasure_feat,
-                nearest_buff_feat,
-                multi_map_feat,
-                np.array(legal_action, dtype=np.float32),
-                progress_feat,
-            ]
-        )
+        # /二级特征
+        # buff_inc = max(0, cur_collected_buff - self.last_collected_buff)
+        # if buff_inc > 0:
+        #     self.buff_remain = MAX_BUFF_DURATION
+        # else:
+        #     self.buff_remain = max(0, self.buff_remain - 1)
+        # m    
+
 
         # Organ potential shaping / 物件势能塑形（缓衰减）
         organ_potential = ORGAN_POTENTIAL_SCALE * (
@@ -281,6 +280,51 @@ class Preprocessor:
         self.last_organ_potential = organ_potential
         self.last_monster_potential = monster_potential
         self.last_hero_pos = current_pos
+
+        # /二级特征
+        if buff_inc > 0:
+            self.buff_remain = MAX_BUFF_DURATION
+        else:
+            self.buff_remain = max(0, self.buff_remain - 1)
+        danger = 0.0
+        for i in range(2):
+            if i >= len(monsters):
+                continue
+            m = monsters[i]
+            if float(m.get("is_in_view", 1)) <= 0:
+                continue
+
+            m_pos = m.get("pos", {})
+            mx = float(m_pos.get("x", 0))
+            mz = float(m_pos.get("z", 0))
+            raw_dist = np.sqrt((hero_x - mx) ** 2 + (hero_z - mz) ** 2)
+
+            # Danger uses potential-like distance decay, scaled by monster speed.
+            m_danger = (
+                MONSTER_POTENTIAL_SCALE
+                * np.exp(-MONSTER_POTENTIAL_DECAY * raw_dist)
+                * float(m.get("speed", 1))
+            )
+            if self.buff_remain > 0:
+                m_danger /= 2.0
+
+            danger = max(danger, m_danger)
+        danger = float(danger)
+        
+        # Concatenate features / 拼接特征
+        feature = np.concatenate(
+            [
+                hero_feat,
+                monster_feats[0],
+                monster_feats[1],
+                nearest_treasure_feat,
+                nearest_buff_feat,
+                multi_map_feat,
+                np.array(legal_action, dtype=np.float32),
+                progress_feat,
+            ]
+        )
+
 
         reward = [
             survive_reward
