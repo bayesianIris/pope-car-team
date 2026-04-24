@@ -113,6 +113,7 @@ class EpisodeRunner:
                 truncated = env_obs["truncated"]
                 step += 1
                 done = terminated or truncated
+                current_value = float(np.array(act_data.value, dtype=np.float32).flatten()[0])
 
                 # Next observation / 处理下一步观测
                 _obs_data, _remain_info = self.agent.observation_process(env_obs)
@@ -131,7 +132,8 @@ class EpisodeRunner:
                         final_reward[0] = -10.0
                         result_str = "FAIL"
                     else:
-                        final_reward[0] = 10.0
+                        # For truncation, add current value estimate
+                        final_reward[0] = 10.0 + current_value
                         result_str = "WIN"
 
                     self.logger.info(
