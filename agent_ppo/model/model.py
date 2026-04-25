@@ -45,7 +45,7 @@ class Model(nn.Module):
         self.map_dim = Config.FEATURES[5]
         self.vec_dim = Config.DIM_OF_OBSERVATION - self.map_dim
 
-        vec_hidden_dim = 128
+        vec_hidden_dim = 256
         fused_dim = 128
         action_num = Config.ACTION_NUM
         value_num = Config.VALUE_NUM
