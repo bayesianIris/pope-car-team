@@ -165,6 +165,7 @@ class Preprocessor:
                 )
             else:
                 monster_feats.append(np.zeros(7, dtype=np.float32))
+                # print("monster_teats:", monster_feats)
 
         organs = frame_state.get("organs", [])
         treasures = [o for o in organs if int(o.get("sub_type", 0)) == 1 and int(o.get("status", 0)) == 1]
