@@ -38,6 +38,8 @@ TREASURE_INC_REWARD = 0.66
 BUFF_INC_REWARD = 0.4
 # Small exploration reward coefficient / 探索奖励系数（小）
 EXPLORE_REWARD_PER_CELL = 0.001
+# Revisit penalty per extra visit / 重复走位惩罚系数
+REVISIT_PENALTY_PER_STEP = 0.005
 # Flash use penalty / 闪现基础使用惩罚
 FLASH_USE_PENALTY = 0.03
 # Flash wall-pass compensation / 闪现穿墙补偿
@@ -91,6 +93,8 @@ class Preprocessor:
         # -1: 未探索, 0: 障碍, 1: 可通行
         self.global_map = np.full((WORLD_MAP_SIZE, WORLD_MAP_SIZE), -1.0, dtype=np.float32)
         self.explored_cell_count = 0
+        self.unexplored_cell_count = WORLD_MAP_SIZE * WORLD_MAP_SIZE
+        self.visit_count_map = np.zeros((WORLD_MAP_SIZE, WORLD_MAP_SIZE), dtype=np.int32)
         self.last_hero_pos = None
         self.position_window = deque(maxlen=WANDER_WINDOW_SIZE)
         self.buff_remain = 0
@@ -185,8 +189,9 @@ class Preprocessor:
 
 
         # Update global explored map and get exploration reward
-        newly_explored = self._update_global_map(map_info, hero_x, hero_z)
+        newly_explored, revisit_penalty = self._update_global_map(map_info, hero_x, hero_z)
         exploration_reward = EXPLORE_REWARD_PER_CELL * newly_explored
+        exploration_ratio = float(self.explored_cell_count) / float(WORLD_MAP_SIZE * WORLD_MAP_SIZE)
 
         # Legal action mask (16D) / 合法动作掩码
         legal_action = [1] * ACTION_DIM
@@ -376,6 +381,7 @@ class Preprocessor:
                 cone_open_dirs_norm,
                 past10_x_norm,
                 past10_z_norm,
+                exploration_ratio,
             ],
             dtype=np.float32,
         )
@@ -402,9 +408,10 @@ class Preprocessor:
             + organ_shaping
             + monster_shaping
             + exploration_reward
+            - revisit_penalty
             - action_fail_penalty
             - wander_penalty
-            # - flash_use_penalty
+            - flash_use_penalty
             + flash_wall_compensation
         ]
 
@@ -477,12 +484,12 @@ class Preprocessor:
 
     def _update_global_map(self, map_info, hero_x, hero_z):
         if not isinstance(map_info, list) or not map_info or not isinstance(map_info[0], list):
-            return 0
+            return 0, 0.0
 
         src_h = len(map_info)
         src_w = len(map_info[0]) if src_h > 0 else 0
         if src_h <= 0 or src_w <= 0:
-            return 0
+            return 0, 0.0
 
         view_size = min(src_h, src_w, LOCAL_VIEW_SIZE)
         center = view_size // 2
@@ -505,7 +512,16 @@ class Preprocessor:
                 self.global_map[gz, gx] = cell_state
 
         self.explored_cell_count += newly_explored
-        return newly_explored
+        self.unexplored_cell_count = max(WORLD_MAP_SIZE * WORLD_MAP_SIZE - self.explored_cell_count, 0)
+
+        visit_penalty = 0.0
+        if 0 <= hero_x < WORLD_MAP_SIZE and 0 <= hero_z < WORLD_MAP_SIZE:
+            self.visit_count_map[hero_z, hero_x] += 1
+            visit_count = int(self.visit_count_map[hero_z, hero_x])
+            if visit_count > 1:
+                visit_penalty = REVISIT_PENALTY_PER_STEP * float(visit_count - 1)
+
+        return newly_explored, visit_penalty
 
     def _frontier_density(self, hero_x, hero_z, radius):
         total = 0

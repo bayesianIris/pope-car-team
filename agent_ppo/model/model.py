@@ -91,7 +91,7 @@ class Model(nn.Module):
 
         将展平观测拆分为向量部分和 21x21 地图部分。
         """
-        # Feature layout: [4,6,6,4,4,4*21*21,16,2], map is the 6th segment.
+        # Feature layout: [4,6,6,4,4,4*21*21,16,2,9], map is the 6th segment.
         map_start = sum(Config.FEATURES[:5])
         map_end = map_start + self.map_dim
 

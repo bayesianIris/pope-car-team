@@ -155,7 +155,7 @@ class Agent(BaseAgent):
 
         合法动作掩码下的 softmax（numpy 版）。
         """
-        _w, _e = 1e20, 1e-5
+        _w, _e = 1e20, 1e-7
         tmp = input_hidden - _w * (1.0 - legal_action)
         tmp_max = np.max(tmp, keepdims=True)
         tmp = np.clip(tmp - tmp_max, -_w, 1)
