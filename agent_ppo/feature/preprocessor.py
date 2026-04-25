@@ -130,7 +130,7 @@ class Preprocessor:
 
         hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
 
-        # Monster features (6D x 2) / 怪物特征（含方位）
+        # Monster features (7D x 2) / 怪物特征：is_in_view, x, z, speed, dist, relative_direction, l2_distance_bucket
         monsters = frame_state.get("monsters", [])
         monster_feats = []
         visible_monster_min_dist = MAP_SIZE * 1.41
@@ -140,6 +140,11 @@ class Preprocessor:
                 m = monsters[i]
                 is_in_view = float(m.get("is_in_view", 1))
                 m_pos = m.get("pos", {})
+                
+                # Always provide hero_relative_direction and hero_l2_distance regardless of in_view
+                rel_dir_norm = _norm(m.get("hero_relative_direction", 0), MAX_REL_DIR)
+                hero_l2_dist_norm = _norm(m.get("hero_l2_distance", 0), 5.0)
+                
                 if is_in_view:
                     mx = float(m_pos.get("x", 0))
                     mz = float(m_pos.get("z", 0))
@@ -148,19 +153,18 @@ class Preprocessor:
                     m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
                     raw_dist = np.sqrt((hero_x - mx) ** 2 + (hero_z - mz) ** 2)
                     dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
-                    rel_dir_norm = _norm(m.get("hero_relative_direction", 0), MAX_REL_DIR)
                     visible_monster_min_dist = min(visible_monster_min_dist, raw_dist)
                 else:
                     m_x_norm = 0.0
                     m_z_norm = 0.0
                     m_speed_norm = 0.0
                     dist_norm = 1.0
-                    rel_dir_norm = 0.0
+                
                 monster_feats.append(
-                    np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm, rel_dir_norm], dtype=np.float32)
+                    np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm, rel_dir_norm, hero_l2_dist_norm], dtype=np.float32)
                 )
             else:
-                monster_feats.append(np.zeros(6, dtype=np.float32))
+                monster_feats.append(np.zeros(7, dtype=np.float32))
 
         organs = frame_state.get("organs", [])
         treasures = [o for o in organs if int(o.get("sub_type", 0)) == 1 and int(o.get("status", 0)) == 1]
@@ -235,6 +239,7 @@ class Preprocessor:
         # Nonlinear monster-distance shaping / 怪物距离非线性塑形
         if visible_monster_min_dist >= MAP_SIZE * 1.41:
             visible_monster_min_dist = MAP_SIZE * 1.41
+
         monster_potential = -MONSTER_POTENTIAL_SCALE * np.exp(
             -MONSTER_POTENTIAL_DECAY * visible_monster_min_dist
         )
