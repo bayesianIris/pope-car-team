@@ -20,6 +20,19 @@ from tools.train_env_conf_validate import read_usr_conf
 from common_python.utils.workflow_disaster_recovery import handle_disaster_recovery
 
 
+def _report_monitor(monitor, payload):
+    """Report monitor payload with standard-first API fallback.
+
+    优先使用腾讯文档标准接口 push_data，不存在时回退到 put_data。
+    """
+    if monitor is None:
+        return
+    if hasattr(monitor, "push_data"):
+        monitor.push_data(payload)
+    elif hasattr(monitor, "put_data"):
+        monitor.put_data(payload)
+
+
 def workflow(envs, agents, logger=None, monitor=None, *args, **kwargs):
     last_save_model_time = time.time()
     env = envs[0]
@@ -94,6 +107,15 @@ class EpisodeRunner:
             done = False
             step = 0
             total_reward = 0.0
+            episode_reward_components = {
+                "reward_survive": 0.0,
+                "reward_collection": 0.0,
+                "reward_organ_shaping": 0.0,
+                "reward_monster_shaping": 0.0,
+                "reward_exploration": 0.0,
+                "reward_action_fail_penalty": 0.0,
+                "reward_wander_penalty": 0.0,
+            }
 
             self.logger.info(f"Episode {self.episode_cnt} start")
 
@@ -120,6 +142,11 @@ class EpisodeRunner:
                 # Step reward / 每步即时奖励
                 reward = np.array(_remain_info.get("reward", [0.0]), dtype=np.float32)
                 total_reward += float(reward[0])
+                reward_components = _remain_info.get("reward_components", {})
+                for metric_name in episode_reward_components:
+                    episode_reward_components[metric_name] += float(
+                        reward_components.get(metric_name, 0.0)
+                    )
 
                 # Terminal reward / 终局奖励
                 final_reward = np.zeros(1, dtype=np.float32)
@@ -165,10 +192,13 @@ class EpisodeRunner:
                     if now - self.last_report_monitor_time >= 60 and self.monitor:
                         monitor_data = {
                             "reward": round(total_reward + float(final_reward[0]), 4),
+                            "reward_terminal": round(float(final_reward[0]), 4),
                             "episode_steps": step,
                             "episode_cnt": self.episode_cnt,
                         }
-                        self.monitor.put_data({os.getpid(): monitor_data})
+                        for metric_name, metric_value in episode_reward_components.items():
+                            monitor_data[metric_name] = round(metric_value, 4)
+                        _report_monitor(self.monitor, {os.getpid(): monitor_data})
                         self.last_report_monitor_time = now
 
                     if collector:

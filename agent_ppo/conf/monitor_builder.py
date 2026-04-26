@@ -38,6 +38,44 @@ def build_monitor():
         )
         .end_panel()
         .add_panel(
+            name="回报来源分解",
+            name_en="reward_breakdown",
+            type="line",
+        )
+        .add_metric(
+            metrics_name="reward_survive",
+            expr="avg(reward_survive{})",
+        )
+        .add_metric(
+            metrics_name="reward_collection",
+            expr="avg(reward_collection{})",
+        )
+        .add_metric(
+            metrics_name="reward_organ_shaping",
+            expr="avg(reward_organ_shaping{})",
+        )
+        .add_metric(
+            metrics_name="reward_monster_shaping",
+            expr="avg(reward_monster_shaping{})",
+        )
+        .add_metric(
+            metrics_name="reward_exploration",
+            expr="avg(reward_exploration{})",
+        )
+        .add_metric(
+            metrics_name="reward_action_fail_penalty",
+            expr="avg(reward_action_fail_penalty{})",
+        )
+        .add_metric(
+            metrics_name="reward_wander_penalty",
+            expr="avg(reward_wander_penalty{})",
+        )
+        .add_metric(
+            metrics_name="reward_terminal",
+            expr="avg(reward_terminal{})",
+        )
+        .end_panel()
+        .add_panel(
             name="总损失",
             name_en="total_loss",
             type="line",

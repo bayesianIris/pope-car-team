@@ -55,7 +55,7 @@ FLASH_ESCAPE_REWARD = 0.03
 # Penalty when action does not move hero position / 动作未发生位移时惩罚
 ACTION_FAIL_PENALTY = 0.02
 # Penalty when 10-step window Manhattan progress is too small / 10步窗口曼哈顿进展过小时惩罚
-WANDER_PENALTY = 0.02
+WANDER_PENALTY = 0.06
 WANDER_WINDOW_SIZE = 10
 WANDER_MANHATTAN_THRESHOLD = 4
 FRONTIER_RADIUS = 10
@@ -252,7 +252,7 @@ class Preprocessor:
         if self.last_organ_potential is None:
             organ_shaping = 0.0
         else:
-            organ_shaping = Config.GAMMA * organ_potential - self.last_organ_potential
+            organ_shaping =  organ_potential - self.last_organ_potential
 
         # Nonlinear monster-distance shaping / 怪物距离非线性塑形
         if visible_monster_min_dist >= MAP_SIZE * 1.41:
@@ -263,7 +263,7 @@ class Preprocessor:
         if self.last_monster_potential is None:
             monster_shaping = 0.0
         else:
-            monster_shaping = Config.GAMMA * monster_potential - self.last_monster_potential
+            monster_shaping = monster_potential - self.last_monster_potential
 
         treasure_inc = max(0, cur_treasures_collected - self.last_treasures_collected)
         buff_inc = max(0, cur_collected_buff - self.last_collected_buff)
@@ -422,18 +422,28 @@ class Preprocessor:
             ]
         )
 
+        reward_components = {
+            "reward_survive": float(survive_reward),
+            "reward_collection": float(collection_reward),
+            "reward_organ_shaping": float(organ_shaping),
+            "reward_monster_shaping": float(monster_shaping),
+            "reward_exploration": float(exploration_reward),
+            "reward_action_fail_penalty": float(-action_fail_penalty),
+            "reward_wander_penalty": float(-wander_penalty),
+        }
+
         reward = [
-            survive_reward
-            + collection_reward
-            + organ_shaping
-            + monster_shaping
-            + exploration_reward
-            - action_fail_penalty
-            - wander_penalty
+            reward_components["reward_survive"]
+            + reward_components["reward_collection"]
+            + reward_components["reward_organ_shaping"]
+            + reward_components["reward_monster_shaping"]
+            + reward_components["reward_exploration"]
+            + reward_components["reward_action_fail_penalty"]
+            + reward_components["reward_wander_penalty"]
             # + flash_escape_reward
         ]
 
-        return feature, legal_action, reward
+        return feature, legal_action, reward, reward_components
 
     def _nearest_organ_feature(self, organs, hero_x, hero_z):
         feat = np.zeros(4, dtype=np.float32)

@@ -24,6 +24,19 @@ import torch
 from agent_ppo.conf.conf import Config
 
 
+def _report_monitor(monitor, payload):
+    """Report monitor payload with standard-first API fallback.
+
+    优先使用腾讯文档标准接口 push_data，不存在时回退到 put_data。
+    """
+    if monitor is None:
+        return
+    if hasattr(monitor, "push_data"):
+        monitor.push_data(payload)
+    elif hasattr(monitor, "put_data"):
+        monitor.put_data(payload)
+
+
 class Algorithm:
     def __init__(self, model, optimizer, device=None, logger=None, monitor=None):
         self.device = device
@@ -94,7 +107,7 @@ class Algorithm:
                 f"entropy:{results['entropy_loss']}"
             )
             if self.monitor:
-                self.monitor.put_data({os.getpid(): results})
+                _report_monitor(self.monitor, {os.getpid(): results})
             self.last_report_monitor_time = now
 
     def _compute_loss(
