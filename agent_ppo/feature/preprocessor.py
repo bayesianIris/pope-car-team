@@ -54,10 +54,10 @@ EXPLORE_REWARD_PER_CELL = 0.001
 FLASH_ESCAPE_REWARD = 0.03
 # Penalty when action does not move hero position / 动作未发生位移时惩罚
 ACTION_FAIL_PENALTY = 0.02
-# Penalty when 10-step window Manhattan progress is too small / 10步窗口曼哈顿进展过小时惩罚
+# Penalty when 10-step window Euclidean progress is too small / 10步窗口欧几里得进展过小时惩罚
 WANDER_PENALTY = 0.06
 WANDER_WINDOW_SIZE = 10
-WANDER_MANHATTAN_THRESHOLD = 4
+WANDER_EUCLIDEAN_THRESHOLD = 4.0
 FRONTIER_RADIUS = 10
 PASSABILITY_RADIUS = 2
 MAX_CONE_OPEN_DIRECTIONS = 8.0
@@ -295,8 +295,8 @@ class Preprocessor:
         wander_penalty = 0.0
         if len(self.position_window) == WANDER_WINDOW_SIZE:
             start_x, start_z = self.position_window[0]
-            manhattan_dist = abs(hero_x - start_x) + abs(hero_z - start_z)
-            if manhattan_dist < WANDER_MANHATTAN_THRESHOLD:
+            euclidean_dist = np.sqrt((hero_x - start_x) ** 2 + (hero_z - start_z) ** 2)
+            if euclidean_dist < WANDER_EUCLIDEAN_THRESHOLD:
                 wander_penalty = WANDER_PENALTY
 
         survive_reward = 0.01
