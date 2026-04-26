@@ -32,32 +32,27 @@ MAX_BUFF_DURATION = 50.0
 # Action dimension / 动作维度
 ACTION_DIM = 16
 
-# Direction offsets for action protocol / 动作协议方向偏移量
-DIRECTION_OFFSETS = (
-    (0, 1),
-    (-1, 1),
-    (-1, 0),
-    (-1, -1),
-    (0, -1),
-    (1, -1),
-    (1, 0),
-    (1, 1),
-)
-
 # Reward for each newly collected treasure / 每新增一个宝箱奖励
 TREASURE_INC_REWARD = 0.66
 # Reward for each newly collected buff / 每新增一个buff奖励
 BUFF_INC_REWARD = 0.4
 # Small exploration reward coefficient / 探索奖励系数（小）
 EXPLORE_REWARD_PER_CELL = 0.001
-# Flash-escape bonus / 闪现拉开距离奖励
-FLASH_ESCAPE_REWARD = 0.03
+# Flash use penalty / 闪现基础使用惩罚
+FLASH_USE_PENALTY = 0.03
+# Flash wall-pass compensation / 闪现穿墙补偿
+FLASH_WALL_COMPENSATION = FLASH_USE_PENALTY + 0.05
 # Penalty when action does not move hero position / 动作未发生位移时惩罚
-ACTION_FAIL_PENALTY = 0.2
+ACTION_FAIL_PENALTY = 0.02
 # Penalty when 10-step window Manhattan progress is too small / 10步窗口曼哈顿进展过小时惩罚
-WANDER_PENALTY = 0.1
+WANDER_PENALTY = 0.02
 WANDER_WINDOW_SIZE = 10
 WANDER_MANHATTAN_THRESHOLD = 4
+FRONTIER_RADIUS = 10
+PASSABILITY_RADIUS = 2
+MAX_CONE_OPEN_DIRECTIONS = 8.0
+SAFETY_MARGIN_SCALE = 20.0
+MIN_SPEED_EPS = 0.1
 
 # Potential-based shaping for organs (slower decay than reference)
 # 参考实现半衰期约1，这里调慢到半衰期约4
@@ -98,6 +93,9 @@ class Preprocessor:
         self.explored_cell_count = 0
         self.last_hero_pos = None
         self.position_window = deque(maxlen=WANDER_WINDOW_SIZE)
+        self.buff_remain = 0
+        self.last_flash_count = None
+        self.flash_cd_remain = 0.0
 
     def feature_process(self, env_obs, last_action):
         """Process env_obs into feature vector, legal_action mask, and reward.
@@ -128,19 +126,16 @@ class Preprocessor:
 
         hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
 
-        # Monster features (7D x 2) / 怪物特征（含桶距离）
+        # Monster features (6D x 2) / 怪物特征（含方位）
         monsters = frame_state.get("monsters", [])
         monster_feats = []
         visible_monster_min_dist = MAP_SIZE * 1.41
+        
         for i in range(2):
             if i < len(monsters):
                 m = monsters[i]
                 is_in_view = float(m.get("is_in_view", 1))
                 m_pos = m.get("pos", {})
-                # 获取环境返回的桶距离和相对方向（无论是否可见都会返回）
-                hero_l2_distance_bucket = int(m.get("hero_l2_distance", 0))  # 0-5
-                rel_dir = int(m.get("hero_relative_direction", 0))  # 0-8
-                
                 if is_in_view:
                     mx = float(m_pos.get("x", 0))
                     mz = float(m_pos.get("z", 0))
@@ -149,22 +144,19 @@ class Preprocessor:
                     m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
                     raw_dist = np.sqrt((hero_x - mx) ** 2 + (hero_z - mz) ** 2)
                     dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
+                    rel_dir_norm = _norm(m.get("hero_relative_direction", 0), MAX_REL_DIR)
                     visible_monster_min_dist = min(visible_monster_min_dist, raw_dist)
                 else:
                     m_x_norm = 0.0
                     m_z_norm = 0.0
                     m_speed_norm = 0.0
                     dist_norm = 1.0
-                
-                # 标准化桶距离（0-5 -> 0-1）和相对方向（0-8 -> 0-1）
-                hero_l2_distance_norm = _norm(hero_l2_distance_bucket, 5.0)
-                rel_dir_norm = _norm(rel_dir, 8.0)
-                
+                    rel_dir_norm = 0.0
                 monster_feats.append(
-                    np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm, hero_l2_distance_norm, rel_dir_norm], dtype=np.float32)
+                    np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm, rel_dir_norm], dtype=np.float32)
                 )
             else:
-                monster_feats.append(np.zeros(7, dtype=np.float32))
+                monster_feats.append(np.zeros(6, dtype=np.float32))
 
         organs = frame_state.get("organs", [])
         treasures = [o for o in organs if int(o.get("sub_type", 0)) == 1 and int(o.get("status", 0)) == 1]
@@ -190,6 +182,8 @@ class Preprocessor:
             ]
         ).astype(np.float32)
 
+
+
         # Update global explored map and get exploration reward
         newly_explored = self._update_global_map(map_info, hero_x, hero_z)
         exploration_reward = EXPLORE_REWARD_PER_CELL * newly_explored
@@ -207,39 +201,11 @@ class Preprocessor:
         if sum(legal_action) == 0:
             legal_action = [1] * ACTION_DIM
 
-        legal_action = self._apply_directional_terrain_mask(legal_action, terrain_map)
-
-        if sum(legal_action) == 0:
-            legal_action = [1] * ACTION_DIM
-
         # Progress features (2D) / 进度特征
         step_norm = _norm(self.step_no, self.max_step)
         survival_ratio = step_norm
         progress_feat = np.array([step_norm, survival_ratio], dtype=np.float32)
 
-        # 10 steps ago position features (2D) / 10步前位置特征
-        pos_10steps_ago_x_norm = 0.0
-        pos_10steps_ago_z_norm = 0.0
-        if len(self.position_window) == WANDER_WINDOW_SIZE:
-            pos_10_steps_ago = self.position_window[0]
-            pos_10steps_ago_x_norm = _norm(pos_10_steps_ago[0], MAP_SIZE)
-            pos_10steps_ago_z_norm = _norm(pos_10_steps_ago[1], MAP_SIZE)
-        pos_10steps_ago_feat = np.array([pos_10steps_ago_x_norm, pos_10steps_ago_z_norm], dtype=np.float32)
-
-        # Concatenate features / 拼接特征
-        feature = np.concatenate(
-            [
-                hero_feat,
-                monster_feats[0],
-                monster_feats[1],
-                nearest_treasure_feat,
-                nearest_buff_feat,
-                multi_map_feat,
-                np.array(legal_action, dtype=np.float32),
-                progress_feat,
-                pos_10steps_ago_feat,
-            ]
-        )
 
         # Organ potential shaping / 物件势能塑形（缓衰减）
         organ_potential = ORGAN_POTENTIAL_SCALE * (
@@ -277,16 +243,16 @@ class Preprocessor:
         collection_reward = TREASURE_INC_REWARD * treasure_inc + BUFF_INC_REWARD * buff_inc
 
         # Flash action index [8, 15]
-        flash_escape_reward = (
-            FLASH_ESCAPE_REWARD
-            if (
-                last_action is not None
-                and int(last_action) >= 8
-                and int(last_action) < ACTION_DIM
-                and monster_shaping > 0.0
-            )
-            else 0.0
-        )
+        flash_use_penalty = 0.0
+        flash_wall_compensation = 0.0
+        if (
+            last_action is not None
+            and int(last_action) >= 8
+            and int(last_action) < ACTION_DIM
+        ):
+            flash_use_penalty = FLASH_USE_PENALTY
+            if self._flash_passed_wall(terrain_map):
+                flash_wall_compensation = FLASH_WALL_COMPENSATION
 
         action_fail_penalty = 0.0
         if (
@@ -314,15 +280,132 @@ class Preprocessor:
         self.last_monster_potential = monster_potential
         self.last_hero_pos = current_pos
 
+        # /二级特征
+        # 危险度特征
+        if buff_inc > 0:
+            self.buff_remain = MAX_BUFF_DURATION
+        else:
+            self.buff_remain = max(0, self.buff_remain - 1)
+        danger = 0.0
+        for i in range(2):
+            if i >= len(monsters):
+                continue
+            m = monsters[i]
+            if float(m.get("is_in_view", 1)) <= 0:
+                continue
+
+            m_pos = m.get("pos", {})
+            mx = float(m_pos.get("x", 0))
+            mz = float(m_pos.get("z", 0))
+            raw_dist = np.sqrt((hero_x - mx) ** 2 + (hero_z - mz) ** 2)
+
+            # Danger uses potential-like distance decay, scaled by monster speed.
+            m_danger = (
+                MONSTER_POTENTIAL_SCALE
+                * np.exp(-MONSTER_POTENTIAL_DECAY * raw_dist)
+                * float(m.get("speed", 1))
+            )
+            if self.buff_remain > 0:
+                m_danger /= 2.0
+
+            danger = max(danger, m_danger)
+        danger = float(danger)
+
+        # Flash cooldown feature / 闪现冷却就绪特征
+        flash_count = int(hero.get("flash_count", 0))
+        flash_cd_config = float(hero.get("flash_cooldown", MAX_FLASH_CD))
+        if self.last_flash_count is None:
+            # Align internal cooldown state with the first frame observation.
+            self.flash_cd_remain = max(0.0, flash_cd_config)
+        elif flash_count != self.last_flash_count:
+            # Re-fire detected by flash_count change, reset cooldown.
+            self.flash_cd_remain = max(0.0, flash_cd_config)
+        else:
+            self.flash_cd_remain = max(0.0, self.flash_cd_remain - 1.0)
+        self.last_flash_count = flash_count
+        flash_ready = 1.0 if self.flash_cd_remain <= 1e-6 else 0.0
+
+        # Safety margin: time-to-monster minus time-to-treasure (normalized)
+        nearest_treasure_dist = MAP_SIZE * 1.41
+        if treasures:
+            nearest_treasure_dist = min(
+                np.sqrt(
+                    (hero_x - float(item.get("pos", {}).get("x", 0))) ** 2
+                    + (hero_z - float(item.get("pos", {}).get("z", 0))) ** 2
+                )
+                for item in treasures
+            )
+        hero_speed = max(float(hero.get("speed", 1.0)), MIN_SPEED_EPS)
+        tta_treasure = nearest_treasure_dist / hero_speed
+
+        tta_monster = MAP_SIZE * 1.41 / MIN_SPEED_EPS
+        for i in range(2):
+            if i >= len(monsters):
+                continue
+            m = monsters[i]
+            if float(m.get("is_in_view", 1)) <= 0:
+                continue
+            m_pos = m.get("pos", {})
+            mx = float(m_pos.get("x", 0))
+            mz = float(m_pos.get("z", 0))
+            m_dist = np.sqrt((hero_x - mx) ** 2 + (hero_z - mz) ** 2)
+            m_speed = max(float(m.get("speed", 1.0)), MIN_SPEED_EPS)
+            tta_monster = min(tta_monster, m_dist / m_speed)
+
+        safety_margin = float(np.tanh((tta_monster - tta_treasure) / SAFETY_MARGIN_SCALE))
+        frontier_density = self._frontier_density(hero_x, hero_z, FRONTIER_RADIUS)
+        passability_width = self._passability_width(terrain_map, PASSABILITY_RADIUS)
+        cone_open_dirs = self._cone_open_directions(terrain_map)
+        cone_open_dirs_norm = _norm(cone_open_dirs, MAX_CONE_OPEN_DIRECTIONS)
+
+        # 10-step-old position feature for anti-wander context.
+        if len(self.position_window) == WANDER_WINDOW_SIZE:
+            past_x, past_z = self.position_window[0]
+        else:
+            past_x, past_z = current_pos
+        past10_x_norm = _norm(past_x, MAP_SIZE)
+        past10_z_norm = _norm(past_z, MAP_SIZE)
+
+        secondary_feat = np.array(
+            [
+                danger,
+                flash_ready,
+                safety_margin,
+                frontier_density,
+                passability_width,
+                cone_open_dirs_norm,
+                past10_x_norm,
+                past10_z_norm,
+            ],
+            dtype=np.float32,
+        )
+        
+        # Concatenate features / 拼接特征
+        feature = np.concatenate(
+            [
+                hero_feat,
+                monster_feats[0],
+                monster_feats[1],
+                nearest_treasure_feat,
+                nearest_buff_feat,
+                multi_map_feat,
+                np.array(legal_action, dtype=np.float32),
+                progress_feat,
+                secondary_feat,
+            ]
+        )
+
+
         reward = [
             survive_reward
             + collection_reward
             + organ_shaping
             + monster_shaping
             + exploration_reward
-            # - action_fail_penalty
+            - action_fail_penalty
             - wander_penalty
-            # + flash_escape_reward
+            - flash_use_penalty
+            + flash_wall_compensation
         ]
 
         return feature, legal_action, reward
@@ -392,33 +475,6 @@ class Preprocessor:
                 entity_map[row, col] = 1.0
         return entity_map
 
-    def _apply_directional_terrain_mask(self, legal_action, terrain_map):
-        if terrain_map.size == 0:
-            return legal_action
-
-        center = LOCAL_VIEW_SIZE // 2
-        if terrain_map[center, center] <= 0.5:
-            return legal_action
-
-        masked_action = list(legal_action)
-        for action_idx in range(min(ACTION_DIM, 16)):
-            direction_idx = action_idx % 8
-            dr, dc = DIRECTION_OFFSETS[direction_idx]
-            next_row = center + dr
-            next_col = center + dc
-
-            if not (0 <= next_row < LOCAL_VIEW_SIZE and 0 <= next_col < LOCAL_VIEW_SIZE):
-                masked_action[action_idx] = 0
-                continue
-
-            if masked_action[action_idx] == 0:
-                continue
-
-            if terrain_map[next_row, next_col] <= 0.5:
-                masked_action[action_idx] = 0
-
-        return masked_action
-
     def _update_global_map(self, map_info, hero_x, hero_z):
         if not isinstance(map_info, list) or not map_info or not isinstance(map_info[0], list):
             return 0
@@ -450,3 +506,118 @@ class Preprocessor:
 
         self.explored_cell_count += newly_explored
         return newly_explored
+
+    def _frontier_density(self, hero_x, hero_z, radius):
+        total = 0
+        frontier = 0
+        for gz in range(max(0, hero_z - radius), min(WORLD_MAP_SIZE, hero_z + radius + 1)):
+            for gx in range(max(0, hero_x - radius), min(WORLD_MAP_SIZE, hero_x + radius + 1)):
+                if self.global_map[gz, gx] != -1:
+                    continue
+                total += 1
+                for nz, nx in ((gz - 1, gx), (gz + 1, gx), (gz, gx - 1), (gz, gx + 1)):
+                    if nz < 0 or nz >= WORLD_MAP_SIZE or nx < 0 or nx >= WORLD_MAP_SIZE:
+                        continue
+                    if self.global_map[nz, nx] >= 0:
+                        frontier += 1
+                        break
+        return float(frontier) / float(total) if total > 0 else 0.0
+
+    def _passability_width(self, terrain_map, radius):
+        if terrain_map.size == 0:
+            return 0.0
+        center = LOCAL_VIEW_SIZE // 2
+        r0 = max(0, center - radius)
+        r1 = min(LOCAL_VIEW_SIZE, center + radius + 1)
+        c0 = max(0, center - radius)
+        c1 = min(LOCAL_VIEW_SIZE, center + radius + 1)
+        patch = terrain_map[r0:r1, c0:c1]
+        if patch.size == 0:
+            return 0.0
+        return float(np.mean(patch > 0.5))
+
+    def _cone_open_directions(self, terrain_map):
+        if terrain_map.size == 0:
+            return 0
+
+        center = LOCAL_VIEW_SIZE // 2
+        if terrain_map[center, center] <= 0.5:
+            return 0
+
+        # Clockwise: N, NE, E, SE, S, SW, W, NW
+        dirs = [
+            (-1, 0),
+            (-1, 1),
+            (0, 1),
+            (1, 1),
+            (1, 0),
+            (1, -1),
+            (0, -1),
+            (-1, -1),
+        ]
+
+        open_count = 0
+        for i in range(8):
+            cone_steps = [dirs[(i - 1) % 8], dirs[i], dirs[(i + 1) % 8]]
+
+            visited = np.zeros((LOCAL_VIEW_SIZE, LOCAL_VIEW_SIZE), dtype=np.bool_)
+            queue = deque([(center, center)])
+            visited[center, center] = True
+            reached_edge = False
+
+            while queue:
+                row, col = queue.popleft()
+                if row == 0 or row == LOCAL_VIEW_SIZE - 1 or col == 0 or col == LOCAL_VIEW_SIZE - 1:
+                    reached_edge = True
+                    break
+
+                for dr, dc in cone_steps:
+                    next_row = row + dr
+                    next_col = col + dc
+                    if not (0 <= next_row < LOCAL_VIEW_SIZE and 0 <= next_col < LOCAL_VIEW_SIZE):
+                        continue
+                    if visited[next_row, next_col]:
+                        continue
+                    if terrain_map[next_row, next_col] <= 0.5:
+                        continue
+                    visited[next_row, next_col] = True
+                    queue.append((next_row, next_col))
+
+            if reached_edge:
+                open_count += 1
+
+        return open_count
+
+    def _flash_passed_wall(self, terrain_map):
+        if terrain_map.size == 0:
+            return False
+
+        center = LOCAL_VIEW_SIZE // 2
+        if terrain_map[center, center] > 0.5:
+            return True
+
+        visited = np.zeros((LOCAL_VIEW_SIZE, LOCAL_VIEW_SIZE), dtype=np.bool_)
+        queue = deque([(center, center)])
+        visited[center, center] = True
+
+        while queue:
+            row, col = queue.popleft()
+            if terrain_map[row, col] <= 0.5:
+                return False
+
+            for next_row, next_col in (
+                (row - 1, col),
+                (row + 1, col),
+                (row, col - 1),
+                (row, col + 1),
+            ):
+                if not (0 <= next_row < LOCAL_VIEW_SIZE and 0 <= next_col < LOCAL_VIEW_SIZE):
+                    continue
+                if visited[next_row, next_col]:
+                    continue
+                if terrain_map[next_row, next_col] > 0.5:
+                    continue
+                visited[next_row, next_col] = True
+                queue.append((next_row, next_col))
+
+        return True
