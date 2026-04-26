@@ -49,7 +49,7 @@ TREASURE_INC_REWARD = 0.66
 # Reward for each newly collected buff / 每新增一个buff奖励
 BUFF_INC_REWARD = 0.4
 # Small exploration reward coefficient / 探索奖励系数（小）
-EXPLORE_REWARD_PER_CELL = 0.001
+EXPLORE_REWARD_PER_CELL = 0.002
 # Flash-escape bonus / 闪现拉开距离奖励
 FLASH_ESCAPE_REWARD = 0.03
 # Penalty when action does not move hero position / 动作未发生位移时惩罚
