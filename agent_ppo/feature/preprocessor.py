@@ -32,6 +32,18 @@ MAX_BUFF_DURATION = 50.0
 # Action dimension / 动作维度
 ACTION_DIM = 16
 
+# Direction offsets for action protocol / 动作协议方向偏移量
+DIRECTION_OFFSETS = (
+    (0, 1),
+    (-1, 1),
+    (-1, 0),
+    (-1, -1),
+    (0, -1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+)
+
 # Reward for each newly collected treasure / 每新增一个宝箱奖励
 TREASURE_INC_REWARD = 0.66
 # Reward for each newly collected buff / 每新增一个buff奖励
@@ -189,6 +201,11 @@ class Preprocessor:
         if sum(legal_action) == 0:
             legal_action = [1] * ACTION_DIM
 
+        legal_action = self._apply_directional_terrain_mask(legal_action, terrain_map)
+
+        if sum(legal_action) == 0:
+            legal_action = [1] * ACTION_DIM
+
         # Progress features (2D) / 进度特征
         step_norm = _norm(self.step_no, self.max_step)
         survival_ratio = step_norm
@@ -291,7 +308,7 @@ class Preprocessor:
             + organ_shaping
             + monster_shaping
             + exploration_reward
-            - action_fail_penalty
+            # - action_fail_penalty
             - wander_penalty
             # + flash_escape_reward
         ]
@@ -362,6 +379,33 @@ class Preprocessor:
             if 0 <= row < LOCAL_VIEW_SIZE and 0 <= col < LOCAL_VIEW_SIZE:
                 entity_map[row, col] = 1.0
         return entity_map
+
+    def _apply_directional_terrain_mask(self, legal_action, terrain_map):
+        if terrain_map.size == 0:
+            return legal_action
+
+        center = LOCAL_VIEW_SIZE // 2
+        if terrain_map[center, center] <= 0.5:
+            return legal_action
+
+        masked_action = list(legal_action)
+        for action_idx in range(min(ACTION_DIM, 16)):
+            direction_idx = action_idx % 8
+            dr, dc = DIRECTION_OFFSETS[direction_idx]
+            next_row = center + dr
+            next_col = center + dc
+
+            if not (0 <= next_row < LOCAL_VIEW_SIZE and 0 <= next_col < LOCAL_VIEW_SIZE):
+                masked_action[action_idx] = 0
+                continue
+
+            if masked_action[action_idx] == 0:
+                continue
+
+            if terrain_map[next_row, next_col] <= 0.5:
+                masked_action[action_idx] = 0
+
+        return masked_action
 
     def _update_global_map(self, map_info, hero_x, hero_z):
         if not isinstance(map_info, list) or not map_info or not isinstance(map_info[0], list):
