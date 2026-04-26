@@ -53,12 +53,11 @@ EXPLORE_REWARD_PER_CELL = 0.002
 # Flash-escape bonus / 闪现拉开距离奖励
 FLASH_ESCAPE_REWARD = 0.03
 # Penalty when action does not move hero position / 动作未发生位移时惩罚
-ACTION_FAIL_PENALTY = 0.02
-# Wander waste penalty: min steps to achieve net displacement, waste = 10 - min_steps
-# 浪费步数惩罚：净位移需要的最少移动步数，浪费步数 = 10 - 最少步数
-WASTE_STEP_THRESHOLD = 4     # wasted steps ≤ this → no penalty / 浪费 ≤ 4 不罚（容忍网格量化损失）
-WASTE_STEP_PENALTY = 0.015   # penalty per wasted step / 每浪费一步的惩罚
+ACTION_FAIL_PENALTY = 0.2
+# Penalty when 10-step window Manhattan progress is too small / 10步窗口曼哈顿进展过小时惩罚
+WANDER_PENALTY = 0.1
 WANDER_WINDOW_SIZE = 10
+WANDER_MANHATTAN_THRESHOLD = 7
 
 # Potential-based shaping for organs (slower decay than reference)
 # 参考实现半衰期约1，这里调慢到半衰期约4
@@ -303,13 +302,9 @@ class Preprocessor:
         wander_penalty = 0.0
         if len(self.position_window) == WANDER_WINDOW_SIZE:
             start_x, start_z = self.position_window[0]
-            dx = self.position_window[-1][0] - start_x
-            dz = self.position_window[-1][1] - start_z
-            # Minimum steps to achieve net displacement (diagonals cover both axes)
-            min_steps = max(abs(dx), abs(dz))
-            wasted_steps = WANDER_WINDOW_SIZE - min_steps
-            if wasted_steps > WASTE_STEP_THRESHOLD:
-                wander_penalty = WASTE_STEP_PENALTY * (wasted_steps - WASTE_STEP_THRESHOLD)
+            manhattan_dist = abs(hero_x - start_x) + abs(hero_z - start_z)
+            if manhattan_dist < WANDER_MANHATTAN_THRESHOLD:
+                wander_penalty = WANDER_PENALTY
 
         survive_reward = 0.01
 
