@@ -129,7 +129,7 @@ class Preprocessor:
 
         hero_feat = np.array([hero_x_norm, hero_z_norm, flash_cd_norm, buff_remain_norm], dtype=np.float32)
 
-        # Monster features (6D x 2) / 怪物特征（含方位）
+        # Monster features (7D x 2) / 怪物特征（含桶距离）
         monsters = frame_state.get("monsters", [])
         monster_feats = []
         visible_monster_min_dist = MAP_SIZE * 1.41
@@ -138,6 +138,10 @@ class Preprocessor:
                 m = monsters[i]
                 is_in_view = float(m.get("is_in_view", 1))
                 m_pos = m.get("pos", {})
+                # 获取环境返回的桶距离和相对方向（无论是否可见都会返回）
+                hero_l2_distance_bucket = int(m.get("hero_l2_distance", 0))  # 0-5
+                rel_dir = int(m.get("hero_relative_direction", 0))  # 0-8
+                
                 if is_in_view:
                     mx = float(m_pos.get("x", 0))
                     mz = float(m_pos.get("z", 0))
@@ -146,19 +150,22 @@ class Preprocessor:
                     m_speed_norm = _norm(m.get("speed", 1), MAX_MONSTER_SPEED)
                     raw_dist = np.sqrt((hero_x - mx) ** 2 + (hero_z - mz) ** 2)
                     dist_norm = _norm(raw_dist, MAP_SIZE * 1.41)
-                    rel_dir_norm = _norm(m.get("hero_relative_direction", 0), MAX_REL_DIR)
                     visible_monster_min_dist = min(visible_monster_min_dist, raw_dist)
                 else:
                     m_x_norm = 0.0
                     m_z_norm = 0.0
                     m_speed_norm = 0.0
                     dist_norm = 1.0
-                    rel_dir_norm = 0.0
+                
+                # 标准化桶距离（0-5 -> 0-1）和相对方向（0-8 -> 0-1）
+                hero_l2_distance_norm = _norm(hero_l2_distance_bucket, 5.0)
+                rel_dir_norm = _norm(rel_dir, 8.0)
+                
                 monster_feats.append(
-                    np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm, rel_dir_norm], dtype=np.float32)
+                    np.array([is_in_view, m_x_norm, m_z_norm, m_speed_norm, dist_norm, hero_l2_distance_norm, rel_dir_norm], dtype=np.float32)
                 )
             else:
-                monster_feats.append(np.zeros(6, dtype=np.float32))
+                monster_feats.append(np.zeros(7, dtype=np.float32))
 
         organs = frame_state.get("organs", [])
         treasures = [o for o in organs if int(o.get("sub_type", 0)) == 1 and int(o.get("status", 0)) == 1]
@@ -211,6 +218,15 @@ class Preprocessor:
         survival_ratio = step_norm
         progress_feat = np.array([step_norm, survival_ratio], dtype=np.float32)
 
+        # 10 steps ago position features (2D) / 10步前位置特征
+        pos_10steps_ago_x_norm = 0.0
+        pos_10steps_ago_z_norm = 0.0
+        if len(self.position_window) == WANDER_WINDOW_SIZE:
+            pos_10_steps_ago = self.position_window[0]
+            pos_10steps_ago_x_norm = _norm(pos_10_steps_ago[0], MAP_SIZE)
+            pos_10steps_ago_z_norm = _norm(pos_10_steps_ago[1], MAP_SIZE)
+        pos_10steps_ago_feat = np.array([pos_10steps_ago_x_norm, pos_10steps_ago_z_norm], dtype=np.float32)
+
         # Concatenate features / 拼接特征
         feature = np.concatenate(
             [
@@ -222,6 +238,7 @@ class Preprocessor:
                 multi_map_feat,
                 np.array(legal_action, dtype=np.float32),
                 progress_feat,
+                pos_10steps_ago_feat,
             ]
         )
 
